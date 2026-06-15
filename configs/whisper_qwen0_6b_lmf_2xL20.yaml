@@ -89,16 +89,16 @@ train:
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  # ===== 2xL20 显存：batch=24 时实测仅占 25/49GB，余量充足 → 放大 batch、grad_accum 降到 1 =====
-  # 显存随 batch 近似线性：25GB@24 → 最坏线性外推 ~42GB@40，仍有 ~7GB 余量。若 OOM 把 batch 降到 32。
-  batch_size: 40
+  # ===== 2xL20 显存：实测 25GB@24、36.6GB@40 → 固定~8.4GB + 每样本~0.71GB；线性外推 ~42GB@48 =====
+  # batch=48 留 ~7GB 余量，且等效 batch 正好回到 96，可沿用原调好的 8e-5。若 OOM 把 batch 降到 40。
+  batch_size: 48
   eval_batch_size: 96      # 评估只在 rank0 跑全量、no_grad，显存更省
   log_every_steps: 40
 
-  # 等效 batch = batch_size(40) * 显卡数(2) * grad_accum(1) = 80；grad_accum 2→1，梯度同步次数减半、更快
+  # 等效 batch = batch_size(48) * 显卡数(2) * grad_accum(1) = 96；grad_accum 2→1，梯度同步次数减半、更快
   gradient_accumulation_steps: 1
 
-  learning_rate: 7.3e-5    # 等效 batch 96→80，按 sqrt(80/96) 把 8e-5 下调到 7.3e-5
+  learning_rate: 8.0e-5    # 等效 batch 回到 96，沿用 8e-5
   warmup_ratio: 0.05
   ema_decay: 0.995
   weight_decay: 0.01
