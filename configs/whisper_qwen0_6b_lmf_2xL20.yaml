@@ -1,0 +1,108 @@
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2  # Phase 1: 从5改为2，增加样本密度
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8           # 2xL20: 云服务器 CPU 核多，加大数据加载并行（每张卡各起 num_workers 个）
+
+# Phase 1: 添加动态上下文配置
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125    # 最少10秒 (125*80ms)
+  max_context_chunks: 375    # 最多30秒
+  context_prob: 0.5          # 50%概率使用动态长度
+
+# ============================================================
+# 路径：默认按 AutoDL（数据盘 /root/autodl-tmp，系统盘小）。
+# 上云后只需把 project_root 改成你实际解压数据的目录，其余自动拼接。
+# ============================================================
+paths:
+  project_root: /root/autodl-tmp/finvcup_2026
+  train_audio_dir: /root/autodl-tmp/finvcup_2026/train/audio
+  train_text_dir: /root/autodl-tmp/finvcup_2026/train/text
+  train_labels_dir: /root/autodl-tmp/finvcup_2026/train/labels
+
+  output_root: /root/autodl-tmp/finvcup_2026/outputs/lmf_2xL20
+  checkpoints_dir: /root/autodl-tmp/finvcup_2026/outputs/lmf_2xL20/checkpoints
+  logs_dir: /root/autodl-tmp/finvcup_2026/outputs/lmf_2xL20/logs
+
+  cache_root: /root/autodl-tmp/finvcup_2026/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: openai/whisper-large-v3
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2         # 显存够，可视情况提到 4（见文末“可选增强”）
+  tail_ratio: 0.25
+
+text_encoder:
+  model_name: Qwen/Qwen3-0.6B
+  max_length: 256
+  freeze_backbone: true
+
+# Phase 2: 增强context_encoder
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+# Phase 2: 增强fusion
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 80
+  max_steps_per_epoch: 20000
+  eval_valid_sample_count: 8000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  # ===== 2xL20 显存放开后的核心改动 =====
+  batch_size: 8            # 单卡真实 batch（8G 时是 1）。先 8，稳了可试 12/16
+  eval_batch_size: 16      # 评估只在 rank0 跑全量，batch 大些更快
+  log_every_steps: 40
+
+  # 等效 batch = batch_size(8) * 显卡数(2) * grad_accum(2) = 32（8G 时仅为 8）
+  gradient_accumulation_steps: 2
+
+  learning_rate: 6.0e-5    # 等效 batch 8→32，按 ~sqrt(4)=2x 把 3e-5 提到 6e-5
+  warmup_ratio: 0.05
+  ema_decay: 0.995
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  use_amp: true
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_2xL20.pt
+  early_stop_patience: 15
+
+env:
+  HF_HOME: /root/autodl-tmp/finvcup_2026/.cache/huggingface
+  TRANSFORMERS_CACHE: /root/autodl-tmp/finvcup_2026/.cache/huggingface
+  TORCH_HOME: /root/autodl-tmp/finvcup_2026/.cache/torch
+  HF_ENDPOINT: https://hf-mirror.com

@@ -156,6 +156,48 @@ class WhisperAudioEncoder(nn.Module):
         )
         return inputs["input_features"]
 
+    def _forward_encoder_split(self, input_features: torch.Tensor) -> torch.Tensor:
+        """Run the frozen prefix under no_grad, only the unfrozen tail layers
+        (+ final layer_norm) with autograd enabled.
+
+        When only the last few Whisper layers are fine-tuned, the dominant
+        memory cost is the activations of the *frozen* prefix (conv stem +
+        early encoder layers), which the default forward stores needlessly
+        because the whole encoder runs in grad mode. Splitting the grad
+        context at the first trainable layer drops those activations.
+
+        Mirrors transformers WhisperEncoder.forward (v4.57); layerdrop is
+        omitted as whisper sets encoder_layerdrop=0.0.
+        """
+        enc = self.encoder
+
+        # First layer with any trainable param; everything before it is frozen.
+        first_trainable = len(enc.layers)
+        for idx, layer in enumerate(enc.layers):
+            if any(p.requires_grad for p in layer.parameters()):
+                first_trainable = idx
+                break
+
+        # Frozen prefix: conv stem + position embed + early layers (no autograd).
+        with torch.no_grad():
+            inputs_embeds = F.gelu(enc.conv1(input_features))
+            inputs_embeds = F.gelu(enc.conv2(inputs_embeds))
+            inputs_embeds = inputs_embeds.permute(0, 2, 1)
+            all_positions = torch.arange(
+                enc.embed_positions.num_embeddings, device=inputs_embeds.device
+            )
+            hidden_states = inputs_embeds + enc.embed_positions(all_positions)
+            hidden_states = F.dropout(hidden_states, p=enc.dropout, training=enc.training)
+            for layer in enc.layers[:first_trainable]:
+                hidden_states = layer(hidden_states, None, layer_head_mask=None,
+                                      output_attentions=False)[0]
+
+        # Trainable tail layers + final layer_norm (autograd enabled).
+        for layer in enc.layers[first_trainable:]:
+            hidden_states = layer(hidden_states, None, layer_head_mask=None,
+                                  output_attentions=False)[0]
+        return enc.layer_norm(hidden_states)
+
     def forward(self, wave: torch.Tensor) -> torch.Tensor:
         with torch.amp.autocast("cuda", enabled=False):
             input_features = self._build_input_features(wave).to(wave.device)
@@ -164,7 +206,9 @@ class WhisperAudioEncoder(nn.Module):
             with torch.no_grad():
                 hidden = self.encoder(input_features=input_features).last_hidden_state
         else:
-            hidden = self.encoder(input_features=input_features).last_hidden_state
+            # Only the unfrozen tail layers build an autograd graph; the frozen
+            # prefix runs under no_grad to save activation memory.
+            hidden = self._forward_encoder_split(input_features)
 
         # Only attend to the tail portion of the time axis
         T = hidden.shape[1]
