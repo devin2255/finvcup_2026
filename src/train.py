@@ -344,6 +344,10 @@ def main():
     start_epoch = 0
     best_metric = -math.inf
     best_path = Path(paths["checkpoints_dir"]) / _get_best_checkpoint_name(cfg)
+    # Top-N ensemble checkpoints (besides the single best). Each member keeps its
+    # own per-label thresholds; manifest lists them sorted by valid metric desc.
+    ensemble_topk = int(cfg["train"].get("ensemble_topk", 0))
+    topk_members: list[dict] = []
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
         target_model = model.module if hasattr(model, "module") else model
@@ -542,6 +546,42 @@ def main():
                     writer.add_scalar("valid/accuracy", metrics_valid["accuracy"], epoch)
                     writer.add_scalar("valid/f1", metrics_valid["f1"], epoch)
                     writer.add_scalar("valid/roc_auc", metrics_valid["roc_auc"], epoch)
+
+            # --- Top-N ensemble checkpoints (runs every epoch, independent of
+            #     the global-best bookkeeping below, so a non-best-but-strong
+            #     epoch can still join the ensemble pool). ---
+            if ensemble_topk > 0:
+                worst_kept = min((m["metric"] for m in topk_members), default=-math.inf)
+                if len(topk_members) < ensemble_topk or metric_value > worst_kept:
+                    member_name = f"ensemble_ep{epoch}.pt"
+                    torch.save(
+                        {
+                            "epoch": epoch,
+                            "metric": metric_value,
+                            "model": eval_model.state_dict(),
+                            "config": cfg,
+                            "thresholds": valid_thresholds,
+                        },
+                        Path(paths["checkpoints_dir"]) / member_name,
+                    )
+                    topk_members.append(
+                        {
+                            "name": member_name,
+                            "epoch": epoch,
+                            "metric": metric_value,
+                            "thresholds": valid_thresholds,
+                        }
+                    )
+                    topk_members.sort(key=lambda m: m["metric"], reverse=True)
+                    while len(topk_members) > ensemble_topk:
+                        evicted = topk_members.pop()
+                        ev_path = Path(paths["checkpoints_dir"]) / evicted["name"]
+                        if ev_path.exists():
+                            ev_path.unlink()
+                    save_json(
+                        Path(paths["logs_dir"]) / "ensemble_manifest.json",
+                        {"save_metric": save_metric, "members": topk_members},
+                    )
 
             if metric_value > best_metric:
                 bad_epochs = 0
