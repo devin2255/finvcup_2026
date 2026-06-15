@@ -85,7 +85,7 @@ train:
 
   epochs: 80
   max_steps_per_epoch: 1000
-  eval_valid_sample_count: 4000  # 阈值/选优要足够正例：BC 仅 3.65%，500 太小会让阈值很噪。建议训练后再用 tune_threshold.py 在全量 valid 上重拟合
+  eval_valid_sample_count: 10000  # 阈值/选优要足够正例：BC 仅 3.65%，500 太小会让阈值很噪。建议训练后再用 tune_threshold.py 在全量 valid 上重拟合
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
@@ -93,7 +93,7 @@ train:
   # stereo=true 时音频前向跑两遍(双声道)，激活显存约翻倍，故 batch 从 48 砍到 24；
   # 配 grad_accum=2 维持等效 batch=24*2卡*2=96。若仍 OOM，把 batch_size 降到 16、grad_accum 升到 3。
   batch_size: 24
-  eval_batch_size: 48      # 评估只在 rank0 跑全量、no_grad；stereo 下也相应减半
+  eval_batch_size: 96      # 评估只在 rank0 跑全量、no_grad；stereo 下也相应减半
   log_every_steps: 40
 
   # 等效 batch = batch_size(24) * 显卡数(2) * grad_accum(2) = 96
