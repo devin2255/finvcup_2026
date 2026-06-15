@@ -40,7 +40,8 @@ class AudioEncoder(nn.Module):
             )
         self._mel_transform = self._mel_transform.to(device)
 
-    def forward(self, wave: torch.Tensor) -> torch.Tensor:
+    def forward(self, wave: torch.Tensor, wave_len: torch.Tensor | None = None) -> torch.Tensor:
+        # wave_len 仅 Whisper 编码器用于变长 mask；CNN 路径忽略以保持接口一致。
         self._ensure_mel(wave.device)
         bsz, chans, _ = wave.shape
         mel_list = []
@@ -119,12 +120,13 @@ class WhisperAudioEncoder(nn.Module):
     def __init__(
         self, model_name: str, sample_rate: int, proj_dim: int,
         freeze: bool = True, tail_ratio: float = 0.2,
-        unfreeze_layers: int = 0,
+        unfreeze_layers: int = 0, stereo: bool = True,
     ):
         super().__init__()
         self.sample_rate = sample_rate
         self.freeze = freeze
         self.tail_ratio = tail_ratio
+        self.stereo = stereo
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
         self.encoder = WhisperModel.from_pretrained(model_name).encoder
         if self.freeze:
@@ -139,22 +141,56 @@ class WhisperAudioEncoder(nn.Module):
         self.encoder_has_trainable_layers = any(p.requires_grad for p in self.encoder.parameters())
         hidden_size = int(self.encoder.config.d_model)
         self.attn_pool = AttentionPooling(hidden_size)
+        # Stereo: 两个声道分别经共享编码器池化后拼接 -> 2*hidden；并显式拼入两声道差，
+        # 直接刻画「重叠/谁更响」这类对 I(打断)/BC(附和) 最关键的跨声道交互。
+        proj_in = hidden_size * 3 if stereo else hidden_size
         self.proj = nn.Sequential(
-            nn.Linear(hidden_size, proj_dim),
+            nn.Linear(proj_in, proj_dim),
             nn.LayerNorm(proj_dim),
             nn.GELU(),
         )
         self.out_dim = proj_dim
+        # Whisper 编码器输出帧 ≈ 输入样本数 / 320（16kHz: hop=160, conv2 stride=2）。
+        self._samples_per_frame = 320
 
-    def _build_input_features(self, wave: torch.Tensor) -> torch.Tensor:
-        mono = wave.mean(dim=1)
-        mono_np = mono.detach().float().cpu().numpy()
+    def _build_input_features(self, wave: torch.Tensor) -> tuple[torch.Tensor, int, int]:
+        """Build log-mel features. Mono: 双声道取平均 [B,T]；Stereo: 每个声道单独成样本
+        [B,C,T] -> [B*C,T]，一次前向得到 [B*C, n_mels, frames]。返回 (features, B, C)。
+        """
+        bsz, chans, _ = wave.shape
+        if self.stereo:
+            flat = wave.reshape(bsz * chans, -1)
+        else:
+            flat = wave.mean(dim=1)  # [B, T]
+            chans = 1
+        flat_np = flat.detach().float().cpu().numpy()
         inputs = self.feature_extractor(
-            [x for x in mono_np],
+            [x for x in flat_np],
             sampling_rate=self.sample_rate,
             return_tensors="pt",
         )
-        return inputs["input_features"]
+        return inputs["input_features"], bsz, chans
+
+    def _tail_mask(self, T_enc: int, wave_len: torch.Tensor | None,
+                   n_items: int, device: torch.device) -> torch.Tensor | None:
+        """构造「只 attend 真实音频尾部 tail_ratio」的布尔 mask [n_items, T_enc]。
+
+        固定 30s（公榜 test1）时退化为全 1 的尾部切片，与旧逻辑一致；变长（私榜
+        test2，上下文 (0,30]s，Whisper 在尾部补零到 30s）时则正确地只看真实音频的
+        尾部，避免把注意力放到静音 padding 上。
+        """
+        if wave_len is None:
+            valid = torch.full((n_items,), T_enc, device=device, dtype=torch.long)
+        else:
+            wl = wave_len.to(device=device, dtype=torch.float32)
+            valid = torch.clamp(
+                (wl / float(self._samples_per_frame)).round().long(), min=1, max=T_enc
+            )
+        tail_len = torch.clamp((valid.float() * self.tail_ratio).round().long(), min=1)
+        idx = torch.arange(T_enc, device=device).unsqueeze(0)  # [1, T_enc]
+        start = (valid - tail_len).clamp(min=0).unsqueeze(1)    # [n, 1]
+        end = valid.unsqueeze(1)                                # [n, 1]
+        return (idx >= start) & (idx < end)                     # [n, T_enc]
 
     def _forward_encoder_split(self, input_features: torch.Tensor) -> torch.Tensor:
         """Run the frozen prefix under no_grad, only the unfrozen tail layers
@@ -198,9 +234,10 @@ class WhisperAudioEncoder(nn.Module):
                                   output_attentions=False)[0]
         return enc.layer_norm(hidden_states)
 
-    def forward(self, wave: torch.Tensor) -> torch.Tensor:
+    def forward(self, wave: torch.Tensor, wave_len: torch.Tensor | None = None) -> torch.Tensor:
         with torch.amp.autocast("cuda", enabled=False):
-            input_features = self._build_input_features(wave).to(wave.device)
+            input_features, bsz, chans = self._build_input_features(wave)
+            input_features = input_features.to(wave.device)
 
         if self.freeze and not self.encoder_has_trainable_layers:
             with torch.no_grad():
@@ -210,11 +247,21 @@ class WhisperAudioEncoder(nn.Module):
             # prefix runs under no_grad to save activation memory.
             hidden = self._forward_encoder_split(input_features)
 
-        # Only attend to the tail portion of the time axis
+        # Masked tail attention pooling over the time axis. hidden 第一维为
+        # B（mono）或 B*C（stereo），mask 同步每个声道复用同一段有效长度。
         T = hidden.shape[1]
-        tail_start = max(0, T - int(T * self.tail_ratio))
-        tail_hidden = hidden[:, tail_start:, :]  # [B, tail_T, D]
-        pooled = self.attn_pool(tail_hidden)
+        n_items = hidden.shape[0]
+        item_wave_len = None
+        if wave_len is not None:
+            item_wave_len = wave_len if not self.stereo else wave_len.repeat_interleave(chans)
+        tail_mask = self._tail_mask(T, item_wave_len, n_items, hidden.device)
+        pooled = self.attn_pool(hidden, mask=tail_mask)  # [n_items, D]
+
+        if self.stereo:
+            d = pooled.shape[-1]
+            pooled = pooled.view(bsz, chans, d)            # [B, C, D]
+            ch0, ch1 = pooled[:, 0, :], pooled[:, 1, :]
+            pooled = torch.cat([ch0, ch1, (ch0 - ch1).abs()], dim=-1)  # [B, 3D]
         return self.proj(pooled)
 
 
@@ -572,6 +619,7 @@ class MultimodalTurnTakingModel(nn.Module):
                 freeze=bool(cfg["audio_encoder"].get("freeze", True)),
                 tail_ratio=float(cfg["audio_encoder"].get("tail_ratio", 0.2)),
                 unfreeze_layers=int(cfg["audio_encoder"].get("unfreeze_layers", 0)),
+                stereo=bool(cfg["audio_encoder"].get("stereo", True)),
             )
         else:
             self.audio_encoder = AudioEncoder(
@@ -616,19 +664,37 @@ class MultimodalTurnTakingModel(nn.Module):
             nn.Linear(self.fusion.out_dim, self.num_targets),
         )
 
+        # 辅助监督头：从同一融合表征预测未来 target_chunks 个 chunk 的 5 类分布。
+        # 比 event-level 更密的监督信号，帮助学到 BC/I 这类稀有事件的时序模式；
+        # 推理只用 event-level 主头，aux 头不参与。aux_chunk_weight<=0 时不启用。
+        self.target_chunks = int(cfg.get("target_chunks", 25))
+        self.aux_num_classes = int(cfg.get("context_encoder", {}).get("vocab_size", 5))
+        self.aux_chunk_weight = float(cfg.get("train", {}).get("aux_chunk_weight", 0.0))
+        if self.aux_chunk_weight > 0:
+            self.aux_head = nn.Linear(self.fusion.out_dim, self.target_chunks * self.aux_num_classes)
+        else:
+            self.aux_head = None
+
     def forward(
         self,
         waveform: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         context_labels: torch.Tensor,
-    ) -> torch.Tensor:
-        audio_feat = self.audio_encoder(waveform)
+        wave_len: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        audio_feat = self.audio_encoder(waveform, wave_len=wave_len)
         text_feat = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         context_feat = self.context_encoder(context_labels=context_labels)
         hand_feat = self.hand_features(context_labels)
         fused = self.fusion(audio_feat, text_feat, context_feat, hand_feat)
         logits = self.head(fused)
         if self.num_targets == 1:
-            return logits.squeeze(-1)
-        return logits
+            logits = logits.squeeze(-1)
+
+        chunk_logits = None
+        if self.aux_head is not None:
+            chunk_logits = self.aux_head(fused).view(
+                fused.shape[0], self.target_chunks, self.aux_num_classes
+            )
+        return logits, chunk_logits

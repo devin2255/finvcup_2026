@@ -130,17 +130,19 @@ def main():
             if max_batches is not None and bi >= max_batches:
                 break
             waveform = batch["waveform"].to(device, non_blocking=True)
+            wave_len = batch["wave_len"].to(device, non_blocking=True)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             context_labels = batch["context_labels"].to(device, non_blocking=True)
             labels = batch["label"]
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model(
+                logits, _ = model(
                     waveform=waveform,
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     context_labels=context_labels,
+                    wave_len=wave_len,
                 )
             probs = torch.sigmoid(logits).cpu().numpy()
             all_labels.extend(labels.cpu().numpy().tolist())

@@ -21,6 +21,7 @@ from src.data import (
 )
 from src.models import MultimodalTurnTakingModel
 from src.utils import (
+    ModelEMA,
     cleanup_distributed,
     compute_multilabel_metrics,
     ensure_dirs,
@@ -60,17 +61,19 @@ def evaluate(
         if max_batches is not None and bi >= max_batches:
             break
         waveform = batch["waveform"].to(device, non_blocking=True)
+        wave_len = batch["wave_len"].to(device, non_blocking=True)
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         context_labels = batch["context_labels"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
-            logits = model(
+            logits, _ = model(
                 waveform=waveform,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 context_labels=context_labels,
+                wave_len=wave_len,
             )
 
         probs = torch.sigmoid(logits)
@@ -181,6 +184,18 @@ def main():
     )
     valid_eval_samples = _select_eval_samples(valid_samples, cfg, seed=int(cfg["seed"]))
 
+    # ---- BC 正例过采样：BC 事件出现率仅 ~3.65%，是 macro-F1 的最大短板。
+    #      把含 BC 正例的训练样本物理复制 oversample_bc 次（>1 生效）。这种「样本列表
+    #      复制」对 DDP / 单卡 shuffle 都透明，比 WeightedRandomSampler 更稳。----
+    oversample_bc = int(cfg["train"].get("oversample_bc", 1))
+    n_bc_extra = 0
+    if oversample_bc > 1 and "BC" in multi_targets:
+        bc_idx = multi_targets.index("BC")
+        bc_pos = [s for s in train_samples if int(s.label_vec[bc_idx]) == 1]
+        n_bc_extra = len(bc_pos) * (oversample_bc - 1)
+        train_samples = list(train_samples) + bc_pos * (oversample_bc - 1)
+        random.Random(int(cfg["seed"]) + 7).shuffle(train_samples)
+
     if is_main:
         save_json(Path(paths["logs_dir"]) / "split_ids.json", split_ids)
         save_json(
@@ -189,6 +204,8 @@ def main():
                 "train_samples": len(train_samples),
                 "valid_samples": len(valid_samples),
                 "valid_eval_samples": len(valid_eval_samples),
+                "oversample_bc": oversample_bc,
+                "bc_extra_samples": n_bc_extra,
             },
         )
         writer = SummaryWriter(log_dir=str(Path(paths["logs_dir"]) / "tb"))
@@ -312,6 +329,10 @@ def main():
     else:
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
+    # 辅助 chunk 级 5 类交叉熵（与主 event-level 头联合训练；权重 0 关闭）
+    aux_chunk_weight = float(cfg["train"].get("aux_chunk_weight", 0.0))
+    aux_criterion = torch.nn.CrossEntropyLoss() if aux_chunk_weight > 0 else None
+
     max_steps_per_epoch_cfg = cfg["train"].get("max_steps_per_epoch", None)
     max_steps_per_epoch = (
         int(max_steps_per_epoch_cfg) if max_steps_per_epoch_cfg is not None else None
@@ -359,6 +380,12 @@ def main():
         start_epoch = int(ckpt["epoch"]) + 1
         best_metric = float(ckpt.get("best_metric", -math.inf))
 
+    # 真权重 EMA：在（可能的）resume 加载之后初始化，确保影子权重从当前权重起步。
+    # 评估/保存切到 EMA 权重，故 best.pt / ensemble checkpoint 存的都是 EMA 权重。
+    use_ema = bool(cfg["train"].get("use_ema", True))
+    ema_target = model.module if hasattr(model, "module") else model
+    ema = ModelEMA(ema_target, decay=float(cfg["train"].get("ema_decay", 0.999))) if use_ema else None
+
     grad_clip = float(cfg["train"]["grad_clip_norm"])
     use_amp = bool(cfg["train"]["use_amp"])
     save_metric = str(cfg["train"]["save_metric"])
@@ -394,19 +421,32 @@ def main():
                     )
                 break
             waveform = batch["waveform"].to(device, non_blocking=True)
+            wave_len = batch["wave_len"].to(device, non_blocking=True)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             context_labels = batch["context_labels"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
+            chunk_labels = (
+                batch["chunk_labels"].to(device, non_blocking=True)
+                if aux_criterion is not None and "chunk_labels" in batch
+                else None
+            )
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model(
+                logits, chunk_logits = model(
                     waveform=waveform,
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     context_labels=context_labels,
+                    wave_len=wave_len,
                 )
-                loss = criterion(logits, labels) / accum_steps
+                loss = criterion(logits, labels)
+                if aux_criterion is not None and chunk_logits is not None and chunk_labels is not None:
+                    B, Tc, Cc = chunk_logits.shape
+                    loss = loss + aux_chunk_weight * aux_criterion(
+                        chunk_logits.reshape(B * Tc, Cc), chunk_labels.reshape(B * Tc)
+                    )
+                loss = loss / accum_steps
 
             if not torch.isfinite(loss):
                 if is_main:
@@ -452,6 +492,8 @@ def main():
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 update_step += 1
+                if ema is not None:
+                    ema.update(ema_target)
             else:
                 grad_norm = float("nan")
 
@@ -495,6 +537,10 @@ def main():
 
         if is_main:
             eval_model = model.module if hasattr(model, "module") else model
+            # 切到 EMA 权重做评估与保存（best.pt / ensemble 存的均为 EMA 权重），
+            # 评估保存完成后再 restore 回训练权重继续下一个 epoch。
+            if ema is not None:
+                ema.copy_to(eval_model)
             metrics_valid = evaluate(
                 eval_model,
                 valid_loader,
@@ -602,8 +648,13 @@ def main():
                 save_json(Path(paths["logs_dir"]) / "best_thresholds.json", {"thresholds": valid_thresholds})
             else:
                 bad_epochs += 1
-                if bad_epochs >= early_stop_patience:
-                    break
+
+            # 评估与保存都用的是 EMA 权重；还原回训练权重再进入下一个 epoch。
+            if ema is not None:
+                ema.restore(eval_model)
+
+            if bad_epochs >= early_stop_patience:
+                break
 
         if is_distributed():
             torch.distributed.barrier()

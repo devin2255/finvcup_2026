@@ -47,6 +47,7 @@ audio_encoder:
   freeze: true
   unfreeze_layers: 2         # Phase 1: 从1增加到2
   tail_ratio: 0.25           # Phase 1: 从0.2增加到0.25
+  stereo: true               # 双声道分别过共享编码器后拼接(+通道差)；8G 下音频前向翻倍，如 OOM 可设 false
 
 text_encoder:
   model_name: Qwen/Qwen3-0.6B
@@ -72,6 +73,11 @@ train:
   pos_weight_cap: 8.0        # Phase 1: 从5.0增加到8.0
   focal_gamma: 2.0           # Phase 1: 从1.0增加到2.0
   label_smoothing: 0.05      # Phase 1: 新增标签平滑
+
+  # ===== 新增提分项 =====
+  oversample_bc: 3           # BC 正例物理过采样倍数(>1生效)
+  aux_chunk_weight: 0.3      # 辅助 chunk 级 5 类监督损失权重(0关闭)
+  use_ema: true              # 真权重 EMA
 
   epochs: 80
   max_steps_per_epoch: 20000

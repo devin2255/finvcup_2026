@@ -51,6 +51,7 @@ audio_encoder:
   freeze: true
   unfreeze_layers: 4         # 2xL20 显存充裕：多解冻2层做任务适配（总参数不变，集成预算不受影响）
   tail_ratio: 0.25
+  stereo: true               # 双声道分别过共享编码器后拼接(+通道差)；直击 I(重叠)/BC(附和) 的跨声道信号。权重共享，参数量不变
 
 text_encoder:
   model_name: /mnt/workspace/dorihue/modelscope/models/Qwen3-0.6B  # 本地路径
@@ -77,21 +78,28 @@ train:
   focal_gamma: 2.0
   label_smoothing: 0.05
 
+  # ===== 新增提分项 =====
+  oversample_bc: 3           # BC 正例物理过采样倍数(>1生效)，缓解 3.65% 极端不均衡
+  aux_chunk_weight: 0.3      # 辅助 chunk 级 5 类监督的损失权重(0关闭)；更密的稀有事件时序信号
+  use_ema: true              # 真权重 EMA；评估/保存/推理用 EMA 权重
+
   epochs: 80
   max_steps_per_epoch: 1000
-  eval_valid_sample_count: 500
+  eval_valid_sample_count: 4000  # 阈值/选优要足够正例：BC 仅 3.65%，500 太小会让阈值很噪。建议训练后再用 tune_threshold.py 在全量 valid 上重拟合
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
   # ===== 2xL20 显存放开后的核心改动 =====
-  batch_size: 48           # 单卡真实 batch（8G 时是 1）。配 unfreeze=4 实测约 18-22GB，仍有余量
-  eval_batch_size: 96      # 评估只在 rank0 跑全量、no_grad，batch 大些更快
+  # stereo=true 时音频前向跑两遍(双声道)，激活显存约翻倍，故 batch 从 48 砍到 24；
+  # 配 grad_accum=2 维持等效 batch=24*2卡*2=96。若仍 OOM，把 batch_size 降到 16、grad_accum 升到 3。
+  batch_size: 24
+  eval_batch_size: 48      # 评估只在 rank0 跑全量、no_grad；stereo 下也相应减半
   log_every_steps: 40
 
-  # 等效 batch = batch_size(24) * 显卡数(2) * grad_accum(1) = 48
-  gradient_accumulation_steps: 1
+  # 等效 batch = batch_size(24) * 显卡数(2) * grad_accum(2) = 96
+  gradient_accumulation_steps: 2
 
-  learning_rate: 8.0e-5    # 等效 batch 32→48，按 ~sqrt(1.5) 把 6e-5 上调到 8e-5
+  learning_rate: 8.0e-5    # 等效 batch ~96，沿用 8e-5
   warmup_ratio: 0.05
   ema_decay: 0.995
   weight_decay: 0.01

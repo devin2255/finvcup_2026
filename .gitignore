@@ -33,3 +33,4 @@ events.out.tfevents.*
 # OS files
 .DS_Store
 Thumbs.db
+.idea/

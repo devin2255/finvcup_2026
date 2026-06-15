@@ -246,7 +246,7 @@ class TurnTakingTrainDataset(Dataset):
             start_idx = max(0, end_idx - self.context_chunks)
 
         context_labels = labels[start_idx:end_idx].astype(np.int64)
-        
+
         # 如果实际长度不足，需要padding
         if len(context_labels) < self.context_chunks:
             pad_len = self.context_chunks - len(context_labels)
@@ -255,7 +255,16 @@ class TurnTakingTrainDataset(Dataset):
                 np.full(pad_len, 4, dtype=np.int64),
                 context_labels
             ])
-        
+
+        # 未来窗口 chunk 级标签（用于辅助监督头；推理不需要）。
+        # 样本构造时保证 end_idx + target_chunks <= len(labels)，正常恒为满 25。
+        future = labels[end_idx:end_idx + self.target_chunks].astype(np.int64)
+        if len(future) < self.target_chunks:
+            future = np.concatenate([
+                future,
+                np.full(self.target_chunks - len(future), 4, dtype=np.int64),  # 末尾不足补 NA
+            ])
+
         start_ms = start_idx * self.chunk_ms
         end_ms = end_idx * self.chunk_ms
 
@@ -270,6 +279,7 @@ class TurnTakingTrainDataset(Dataset):
             "waveform": wave,
             "text": text,
             "context_labels": torch.from_numpy(context_labels),
+            "chunk_labels": torch.from_numpy(future),
         }
         if hasattr(sample, "label_vec"):
             out["label"] = torch.tensor(sample.label_vec, dtype=torch.float32)
@@ -347,6 +357,8 @@ class CollateFn:
         )
 
         waves = [b["waveform"] for b in batch]
+        # 真实有效长度（collate 右侧补零之前），用于 Whisper 变长 padding 的 mask
+        wave_lens = torch.tensor([int(w.shape[1]) for w in waves], dtype=torch.long)
         max_len = max(w.shape[1] for w in waves)
         padded_waves = []
         for w in waves:
@@ -356,10 +368,14 @@ class CollateFn:
 
         out = {
             "waveform": torch.stack(padded_waves, dim=0),
+            "wave_len": wave_lens,
             "input_ids": tokenized["input_ids"],
             "attention_mask": tokenized["attention_mask"],
             "context_labels": torch.stack([b["context_labels"] for b in batch], dim=0),
         }
+
+        if "chunk_labels" in batch[0]:
+            out["chunk_labels"] = torch.stack([b["chunk_labels"] for b in batch], dim=0)
 
         if "label" in batch[0]:
             out["label"] = torch.stack([b["label"] for b in batch], dim=0)

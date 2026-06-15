@@ -203,6 +203,49 @@ def compute_gaussian_soft_f1_sequence(
     }
 
 
+class ModelEMA:
+    """指数滑动平均（EMA）of 可训练参数。
+
+    之前 config 里的 `ema_decay` 只被用来平滑「显示用的 loss」，并没有对模型权重做
+    EMA。这里实现真正的权重 EMA：每次 optimizer.step 后更新影子权重；评估/保存时用
+    `copy_to` 切到 EMA 权重、评估完 `restore` 还原继续训练。
+
+    只跟踪 requires_grad 的参数（冻结的 Whisper/Qwen 主干不变，无需 EMA，省显存）。
+    本模型只含 LayerNorm（无 running buffer），故不跟踪 buffer。
+    """
+
+    def __init__(self, model, decay: float = 0.999):
+        self.decay = float(decay)
+        self.shadow = {
+            n: p.detach().clone().float()
+            for n, p in model.named_parameters() if p.requires_grad
+        }
+        self.backup: Dict[str, "torch.Tensor"] = {}
+
+    @torch.no_grad()
+    def update(self, model) -> None:
+        d = self.decay
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self.shadow:
+                self.shadow[n].mul_(d).add_(p.detach().float(), alpha=1.0 - d)
+
+    @torch.no_grad()
+    def copy_to(self, model) -> None:
+        """切到 EMA 权重，并备份当前权重以便 restore。"""
+        self.backup = {}
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self.shadow:
+                self.backup[n] = p.detach().clone()
+                p.data.copy_(self.shadow[n].to(dtype=p.dtype))
+
+    @torch.no_grad()
+    def restore(self, model) -> None:
+        for n, p in model.named_parameters():
+            if n in self.backup:
+                p.data.copy_(self.backup[n])
+        self.backup = {}
+
+
 def save_json(path: Path, obj: Dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
