@@ -1,0 +1,9 @@
+numpy
+scipy
+scikit-learn
+pyyaml
+tqdm
+torch
+torchaudio
+transformers<5
+tensorboard

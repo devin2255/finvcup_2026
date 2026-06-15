@@ -1,0 +1,101 @@
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2  # Phase 1: 从5改为2，增加样本密度
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 2
+
+# Phase 1: 添加动态上下文配置
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125    # 最少10秒 (125*80ms)
+  max_context_chunks: 375    # 最多30秒
+  context_prob: 0.5          # 50%概率使用动态长度
+
+paths:
+  project_root: D:/bisai/V2/2026_finvcup_baseline
+  train_audio_dir: D:/bisai/V2/2026_finvcup_baseline/train/audio
+  train_text_dir: D:/bisai/V2/2026_finvcup_baseline/train/text
+  train_labels_dir: D:/bisai/V2/2026_finvcup_baseline/train/labels
+
+  output_root: D:/bisai/V2/2026_finvcup_baseline/outputs/lmf_8g_optimized
+  checkpoints_dir: D:/bisai/V2/2026_finvcup_baseline/outputs/lmf_8g_optimized/checkpoints
+  logs_dir: D:/bisai/V2/2026_finvcup_baseline/outputs/lmf_8g_optimized/logs
+
+  cache_root: D:/bisai/V2/2026_finvcup_baseline/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: openai/whisper-large-v3
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2         # Phase 1: 从1增加到2
+  tail_ratio: 0.25           # Phase 1: 从0.2增加到0.25
+
+text_encoder:
+  model_name: Qwen/Qwen3-0.6B
+  max_length: 256
+  freeze_backbone: true
+
+# Phase 2: 增强context_encoder
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24              # 从16增加到24
+  channels: [48, 96]         # 从[32,64]增加到[48,96]
+  tail_k: 75                 # 从50增加到75
+
+# Phase 2: 增强fusion
+fusion:
+  hidden_dim: 320            # 从256增加到320
+  bilinear_rank: 64          # 从48增加到64
+  dropout: 0.25              # 从0.2增加到0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0        # Phase 1: 从5.0增加到8.0
+  focal_gamma: 2.0           # Phase 1: 从1.0增加到2.0
+  label_smoothing: 0.05      # Phase 1: 新增标签平滑
+
+  epochs: 80
+  max_steps_per_epoch: 20000
+  eval_valid_sample_count: 8000  # Phase 1: 从4000增加到8000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  batch_size: 1
+  eval_batch_size: 2
+  log_every_steps: 40
+
+  learning_rate: 3.0e-5      # Phase 1: 从5e-5降低到3e-5
+  warmup_ratio: 0.05         # Phase 1: 从0.01增加到0.05
+  ema_decay: 0.995           # Phase 1: 从0.98增加到0.995
+  weight_decay: 0.01
+  grad_clip_norm: 1.0
+  use_amp: true
+  gradient_accumulation_steps: 8
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_optimized.pt
+  early_stop_patience: 15
+
+env:
+  HF_HOME: D:/bisai/V2/2026_finvcup_baseline/.cache/huggingface
+  TRANSFORMERS_CACHE: D:/bisai/V2/2026_finvcup_baseline/.cache/huggingface
+  TORCH_HOME: D:/bisai/V2/2026_finvcup_baseline/.cache/torch
+  HF_ENDPOINT: https://hf-mirror.com

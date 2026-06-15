@@ -1,0 +1,35 @@
+# Large dataset directories — do not commit
+train/
+test/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+.env/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Model checkpoints / large binary files
+*.pt
+*.pth
+*.bin
+*.onnx
+*.h5
+*.pkl
+*.npy
+*.npz
+
+# TensorBoard event files
+events.out.tfevents.*
+
+# OS files
+.DS_Store
+Thumbs.db
