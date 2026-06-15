@@ -49,7 +49,7 @@ audio_encoder:
   model_name: /mnt/workspace/dorihue/modelscope/models/whisper-large-v3  # 本地路径，注意核对文件夹真实名字
   proj_dim: 512
   freeze: true
-  unfreeze_layers: 2         # 显存够，可视情况提到 4（见文末“可选增强”）
+  unfreeze_layers: 4         # 2xL20 显存充裕：多解冻2层做任务适配（总参数不变，集成预算不受影响）
   tail_ratio: 0.25
 
 text_encoder:
@@ -78,20 +78,20 @@ train:
   label_smoothing: 0.05
 
   epochs: 80
-  max_steps_per_epoch: 20000
-  eval_valid_sample_count: 8000
+  max_steps_per_epoch: 10000
+  eval_valid_sample_count: 4000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
   # ===== 2xL20 显存放开后的核心改动 =====
-  batch_size: 8            # 单卡真实 batch（8G 时是 1）。先 8，稳了可试 12/16
-  eval_batch_size: 16      # 评估只在 rank0 跑全量，batch 大些更快
+  batch_size: 24           # 单卡真实 batch（8G 时是 1）。配 unfreeze=4 实测约 18-22GB，仍有余量
+  eval_batch_size: 32      # 评估只在 rank0 跑全量、no_grad，batch 大些更快
   log_every_steps: 40
 
-  # 等效 batch = batch_size(8) * 显卡数(2) * grad_accum(2) = 32（8G 时仅为 8）
-  gradient_accumulation_steps: 2
+  # 等效 batch = batch_size(24) * 显卡数(2) * grad_accum(1) = 48
+  gradient_accumulation_steps: 1
 
-  learning_rate: 6.0e-5    # 等效 batch 8→32，按 ~sqrt(4)=2x 把 3e-5 提到 6e-5
+  learning_rate: 8.0e-5    # 等效 batch 32→48，按 ~sqrt(1.5) 把 6e-5 上调到 8e-5
   warmup_ratio: 0.05
   ema_decay: 0.995
   weight_decay: 0.01
@@ -99,7 +99,7 @@ train:
   use_amp: true
   save_metric: best_f1
   best_checkpoint_name: best_lmf_2xL20.pt
-  early_stop_patience: 15
+  early_stop_patience: 10
 
   # 集成推理：除最优模型外，再保留按 valid 指标排名的 top-N 个 checkpoint。
   # 单模型≈1.24B(Whisper-enc 637M + Qwen3-0.6B 596M + 自定义~8M)，
