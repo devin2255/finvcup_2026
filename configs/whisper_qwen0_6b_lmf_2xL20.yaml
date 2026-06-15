@@ -113,6 +113,7 @@ train:
   # 单模型≈1.24B(Whisper-enc 637M + Qwen3-0.6B 596M + 自定义~8M)，
   # N*1.24B 必须≤8B → 硬上限 6；取 5 留余量(6.2B)。0 表示关闭。
   ensemble_topk: 5
+  ensemble_min_epoch_gap: 2   # 成员至少相隔2个epoch，避免选一堆相邻epoch而失去集成多样性
 
 env:
   HF_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface

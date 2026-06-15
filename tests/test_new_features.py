@@ -153,11 +153,50 @@ def test_collate_wave_len_and_chunks():
     print("[ok] CollateFn: wave_len captured pre-pad, chunk_labels stacked")
 
 
+def test_plan_ensemble_update():
+    from src.utils import plan_ensemble_update
+
+    topk, gap = 5, 2
+
+    # Simulate epoch-by-epoch metric stream; replicate train.py's apply logic.
+    members: list[dict] = []
+
+    def apply(epoch, metric):
+        add, evict = plan_ensemble_update(members, epoch, metric, topk, gap)
+        if add:
+            for e in evict:
+                members.remove(e)
+            members.append({"name": f"ep{epoch}", "epoch": epoch, "metric": metric})
+
+    # rising metric on consecutive epochs -> must NOT keep adjacent members
+    for ep, mt in [(0, 0.50), (1, 0.55), (2, 0.60), (3, 0.62), (4, 0.61),
+                   (5, 0.65), (6, 0.64), (7, 0.70), (8, 0.69), (9, 0.66)]:
+        apply(ep, mt)
+
+    eps = sorted(m["epoch"] for m in members)
+    # invariant: every pair of members is >= gap epochs apart
+    assert all(b - a >= gap for a, b in zip(eps, eps[1:])), eps
+    assert len(members) <= topk
+    # the global best epoch (7, 0.70) must be retained
+    assert any(m["epoch"] == 7 for m in members), eps
+
+    # a strictly-better neighbor should evict the adjacent weaker one
+    members2 = [{"name": "ep10", "epoch": 10, "metric": 0.60}]
+    add, evict = plan_ensemble_update(members2, 11, 0.65, topk, gap)
+    assert add and evict and evict[0]["epoch"] == 10  # 11 beats neighbor 10 -> replace
+
+    # a weaker neighbor must be rejected (keeps spacing, keeps the better one)
+    add, evict = plan_ensemble_update(members2, 11, 0.55, topk, gap)
+    assert not add and not evict
+    print("[ok] plan_ensemble_update: spacing invariant + keeps best + neighbor competition")
+
+
 if __name__ == "__main__":
     test_tail_mask()
     test_stereo_concat_shape()
     test_aux_head_loss()
     test_model_ema()
     test_bc_oversample()
+    test_plan_ensemble_update()
     test_collate_wave_len_and_chunks()
     print("\nALL TESTS PASSED")

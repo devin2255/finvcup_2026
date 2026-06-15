@@ -27,6 +27,7 @@ from src.utils import (
     ensure_dirs,
     is_distributed,
     load_config,
+    plan_ensemble_update,
     save_json,
     set_env_paths,
     set_seed,
@@ -368,6 +369,8 @@ def main():
     # Top-N ensemble checkpoints (besides the single best). Each member keeps its
     # own per-label thresholds; manifest lists them sorted by valid metric desc.
     ensemble_topk = int(cfg["train"].get("ensemble_topk", 0))
+    # 集成成员之间的最小 epoch 间隔（保证多样性；1 等价于纯 top-N 不约束）
+    ensemble_min_epoch_gap = int(cfg["train"].get("ensemble_min_epoch_gap", 1))
     topk_members: list[dict] = []
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu")
@@ -595,16 +598,33 @@ def main():
 
             # --- Top-N ensemble checkpoints (runs every epoch, independent of
             #     the global-best bookkeeping below, so a non-best-but-strong
-            #     epoch can still join the ensemble pool). ---
+            #     epoch can still join the ensemble pool). 成员之间强制至少相隔
+            #     ensemble_min_epoch_gap 个 epoch，避免选到一堆几乎相同的相邻 epoch
+            #     而失去集成多样性。保存的是 EMA 权重（与 best.pt 一致）。 ---
             if ensemble_topk > 0:
-                worst_kept = min((m["metric"] for m in topk_members), default=-math.inf)
-                if len(topk_members) < ensemble_topk or metric_value > worst_kept:
+                add_member, to_evict = plan_ensemble_update(
+                    topk_members, epoch, metric_value, ensemble_topk, ensemble_min_epoch_gap,
+                )
+                if add_member:
+                    for evicted in to_evict:
+                        topk_members.remove(evicted)
+                        ev_path = Path(paths["checkpoints_dir"]) / evicted["name"]
+                        if ev_path.exists():
+                            ev_path.unlink()
                     member_name = f"ensemble_ep{epoch}.pt"
+                    # 集成成员只存可训练参数（~0.35GB 而非 ~5GB）：冻结的 Whisper/Qwen 主干
+                    # 在加载时由 from_pretrained 重建，且所有推理 loader 均用 strict=False。
+                    # 5 个成员从 ~25GB 降到 ~1.7GB，集成才真正可落地。best.pt 仍存全量（供 resume）。
+                    trainable_keys = {n for n, p in eval_model.named_parameters() if p.requires_grad}
+                    member_state = {
+                        k: v for k, v in eval_model.state_dict().items() if k in trainable_keys
+                    }
                     torch.save(
                         {
                             "epoch": epoch,
                             "metric": metric_value,
-                            "model": eval_model.state_dict(),
+                            "model": member_state,
+                            "trainable_only": True,
                             "config": cfg,
                             "thresholds": valid_thresholds,
                         },
@@ -619,11 +639,6 @@ def main():
                         }
                     )
                     topk_members.sort(key=lambda m: m["metric"], reverse=True)
-                    while len(topk_members) > ensemble_topk:
-                        evicted = topk_members.pop()
-                        ev_path = Path(paths["checkpoints_dir"]) / evicted["name"]
-                        if ev_path.exists():
-                            ev_path.unlink()
                     save_json(
                         Path(paths["logs_dir"]) / "ensemble_manifest.json",
                         {"save_metric": save_metric, "members": topk_members},

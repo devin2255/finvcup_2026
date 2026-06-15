@@ -100,6 +100,10 @@ train:
   best_checkpoint_name: best_lmf_optimized.pt
   early_stop_patience: 15
 
+  # 集成：保留 top-N 个 checkpoint（只存可训练参数，每个 ~0.35GB）。
+  ensemble_topk: 5
+  ensemble_min_epoch_gap: 2   # 成员至少相隔2个epoch，保证集成多样性
+
 env:
   HF_HOME: D:/bisai/V2/2026_finvcup_baseline/.cache/huggingface
   TRANSFORMERS_CACHE: D:/bisai/V2/2026_finvcup_baseline/.cache/huggingface

@@ -246,6 +246,39 @@ class ModelEMA:
         self.backup = {}
 
 
+def plan_ensemble_update(members, epoch, metric, topk, min_gap=1):
+    """决定一个新 epoch 是否进入 top-N 集成池，以及要淘汰谁（纯逻辑，便于单测）。
+
+    在「按 valid 指标取 top-N」之上加一个**最小 epoch 间隔**约束：成员之间至少相隔
+    `min_gap` 个 epoch。否则 top-N 很容易全是峰值附近的相邻 epoch，权重高度相似（叠加
+    权重 EMA 后更甚），集成几乎没有多样性、提分有限。拉开间隔才能让各成员落在不同的
+    局部解上，集成才有意义。
+
+    Args:
+        members: 已保存成员列表，每个含 {"epoch", "metric", ...}。
+        epoch, metric: 当前 epoch 及其 valid 指标。
+        topk: 池子容量。min_gap: 成员间最小 epoch 间隔（1 等价于不约束）。
+
+    Returns:
+        (add: bool, to_evict: list[member]) —— 是否保存当前 epoch，以及需删除的旧成员。
+
+    不变量：每次更新后任意两成员 epoch 间隔 >= min_gap，故当前 epoch 至多与 1 个已有
+    成员相邻（competition slot），淘汰它即可维持不变量。
+    """
+    near = [m for m in members if abs(int(m["epoch"]) - int(epoch)) < int(min_gap)]
+    if near:
+        rival = min(near, key=lambda m: m["metric"])
+        if metric > rival["metric"]:
+            return True, [rival]
+        return False, []
+    if len(members) < int(topk):
+        return True, []
+    worst = min(members, key=lambda m: m["metric"])
+    if metric > worst["metric"]:
+        return True, [worst]
+    return False, []
+
+
 def save_json(path: Path, obj: Dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
