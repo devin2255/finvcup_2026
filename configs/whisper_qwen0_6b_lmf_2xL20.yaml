@@ -78,14 +78,14 @@ train:
   label_smoothing: 0.05
 
   epochs: 80
-  max_steps_per_epoch: 5000
-  eval_valid_sample_count: 2000
+  max_steps_per_epoch: 1000
+  eval_valid_sample_count: 500
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
   # ===== 2xL20 显存放开后的核心改动 =====
-  batch_size: 24           # 单卡真实 batch（8G 时是 1）。配 unfreeze=4 实测约 18-22GB，仍有余量
-  eval_batch_size: 32      # 评估只在 rank0 跑全量、no_grad，batch 大些更快
+  batch_size: 48           # 单卡真实 batch（8G 时是 1）。配 unfreeze=4 实测约 18-22GB，仍有余量
+  eval_batch_size: 96      # 评估只在 rank0 跑全量、no_grad，batch 大些更快
   log_every_steps: 40
 
   # 等效 batch = batch_size(24) * 显卡数(2) * grad_accum(1) = 48
