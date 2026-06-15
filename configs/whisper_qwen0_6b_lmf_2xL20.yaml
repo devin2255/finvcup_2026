@@ -46,14 +46,14 @@ split:
 
 audio_encoder:
   type: whisper
-  model_name: openai/whisper-large-v3
+  model_name: /mnt/workspace/dorihue/modelscope/models/whisper-large-v3  # 本地路径，注意核对文件夹真实名字
   proj_dim: 512
   freeze: true
   unfreeze_layers: 2         # 显存够，可视情况提到 4（见文末“可选增强”）
   tail_ratio: 0.25
 
 text_encoder:
-  model_name: Qwen/Qwen3-0.6B
+  model_name: /mnt/workspace/dorihue/modelscope/models/Qwen3-0.6B  # 本地路径
   max_length: 256
   freeze_backbone: true
 
@@ -110,4 +110,6 @@ env:
   HF_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
   TRANSFORMERS_CACHE: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
   TORCH_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/torch
-  HF_ENDPOINT: https://hf-mirror.com
+  # 模型已在本地，强制离线，避免任何联网探测
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"

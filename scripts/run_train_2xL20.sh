@@ -11,8 +11,9 @@ NUM_GPUS=2
 
 # 两张卡都可见（如服务器上卡更多，按需改成 "0,1"）
 export CUDA_VISIBLE_DEVICES=0,1
-# 国内拉取 HF 权重走镜像（whisper-large-v3 / Qwen3-0.6B）
-export HF_ENDPOINT=https://hf-mirror.com
+# 模型已下载到本地（config 里 model_name 指向绝对路径），强制离线、不联网
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 # 降低显存碎片导致的 OOM 概率
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # 避免 tokenizers 在多 worker 下 fork 警告
