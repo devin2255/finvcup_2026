@@ -78,7 +78,7 @@ train:
   label_smoothing: 0.05      # 保持 8g_optimized 设置
 
   epochs: 80
-  max_steps_per_epoch: 300       # 保持 8g_optimized 设置
+  max_steps_per_epoch: 200       # 保持 8g_optimized 设置
   eval_valid_sample_count: 8000    # 保持 8g_optimized 设置
   eval_valid_max_batches: null
   eval_valid_shuffle: false
