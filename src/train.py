@@ -120,6 +120,25 @@ def _extract_best_thresholds(metrics: dict, label_names: list[str]) -> dict[str,
     return {name: float(metrics.get(f"{name}_best_threshold", 0.5)) for name in label_names}
 
 
+def _trainable_state_dict(model) -> dict:
+    """Return only the trainable (requires_grad=True) parameters of `model`.
+
+    Ensemble members are pure inference artifacts: the frozen Whisper/Qwen
+    backbones are identical across members and reloaded from the same local
+    pretrained paths at inference time, so storing them per-member wastes
+    ~5GB each. We keep only the fine-tuned params (~170MB) and overlay them
+    with strict=False on a freshly built model (see src/infer_ensemble.py).
+    Buffers are excluded; the whisper/qwen path carries no train-critical
+    buffers (LayerNorm, no BatchNorm running stats).
+    """
+    trainable_keys = {n for n, p in model.named_parameters() if p.requires_grad}
+    return {
+        k: v.detach().cpu()
+        for k, v in model.state_dict().items()
+        if k in trainable_keys
+    }
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -558,7 +577,9 @@ def main():
                         {
                             "epoch": epoch,
                             "metric": metric_value,
-                            "model": eval_model.state_dict(),
+                            # Slim: only fine-tuned params (~170MB vs ~5GB full).
+                            "model": _trainable_state_dict(eval_model),
+                            "trainable_only": True,
                             "config": cfg,
                             "thresholds": valid_thresholds,
                         },
