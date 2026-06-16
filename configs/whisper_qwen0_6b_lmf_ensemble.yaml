@@ -79,8 +79,8 @@ train:
   label_smoothing: 0.05      # 保持 8g_optimized 设置
 
   epochs: 80
-  max_steps_per_epoch: 100       # 原 8g_optimized: 20000（你已改小为 100，每个 epoch 更短、出 checkpoint 更频繁）
-  eval_valid_sample_count: 8000    # 保持 8g_optimized 设置
+  max_steps_per_epoch: 500       # 原 8g_optimized: 20000（你已改小为 100，每个 epoch 更短、出 checkpoint 更频繁）
+  eval_valid_sample_count: 16000    # 保持 8g_optimized 设置
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
