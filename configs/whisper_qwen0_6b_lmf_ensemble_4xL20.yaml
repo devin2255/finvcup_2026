@@ -6,7 +6,7 @@ stride: 2  # Phase 1: 从5改为2，增加样本密度
 sample_rate: 16000
 max_train_samples: null
 max_valid_samples: null
-num_workers: 8           # 原 8g_optimized: 2。云服务器 CPU 核多，加大并行（吞吐项，不影响结果）
+num_workers: 8           # 每个 rank 各起 num_workers 个：4卡=4×8=32 进程；若 CPU 吃紧改 4~6
 
 # Phase 1: 添加动态上下文配置
 data_augmentation:
@@ -16,9 +16,9 @@ data_augmentation:
   context_prob: 0.5          # 50%概率使用动态长度
 
 # ============================================================
-# 路径：沿用 2xL20 租用服务器约定（Linux + 本地模型 + 离线）。
+# 路径：沿用租用服务器约定（Linux + 本地模型 + 离线）。
+# 4卡输出目录独立（lmf_ensemble_4xL20），不会覆盖 2卡(lmf_ensemble) 的 checkpoint。
 # 上服务器后只需把 project_root 改成实际解压数据的目录，其余自动拼接。
-# 原 8g_optimized: Windows D:/bisai/V2/... + 输出目录 outputs/lmf_8g_optimized。
 # ============================================================
 paths:
   project_root: /mnt/workspace/dorihue/finvcup_2026
@@ -26,9 +26,9 @@ paths:
   train_text_dir: /mnt/workspace/dorihue/finvcup_2026/train/text
   train_labels_dir: /mnt/workspace/dorihue/finvcup_2026/train/labels
 
-  output_root: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble
-  checkpoints_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble/checkpoints
-  logs_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble/logs
+  output_root: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble_4xL20
+  checkpoints_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble_4xL20/checkpoints
+  logs_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble_4xL20/logs
 
   cache_root: /mnt/workspace/dorihue/finvcup_2026/.cache
 
@@ -47,14 +47,14 @@ split:
 
 audio_encoder:
   type: whisper
-  model_name: /mnt/workspace/dorihue/modelscope/models/whisper-large-v3  # 本地路径，注意核对文件夹真实名字（原 8g_optimized: openai/whisper-large-v3 + HF 镜像）
+  model_name: /mnt/workspace/dorihue/modelscope/models/whisper-large-v3  # 本地路径，注意核对文件夹真实名字
   proj_dim: 512
   freeze: true
   unfreeze_layers: 2         # 保持 8g_optimized 设置（其它优化不调整）
   tail_ratio: 0.25           # 保持 8g_optimized 设置
 
 text_encoder:
-  model_name: /mnt/workspace/dorihue/modelscope/models/Qwen3-0.6B  # 本地路径（原 8g_optimized: Qwen/Qwen3-0.6B + HF 镜像）
+  model_name: /mnt/workspace/dorihue/modelscope/models/Qwen3-0.6B  # 本地路径
   max_length: 256
   freeze_backbone: true
 
@@ -79,31 +79,34 @@ train:
   label_smoothing: 0.05      # 保持 8g_optimized 设置
 
   epochs: 80
-  max_steps_per_epoch: 10000       # 原 8g_optimized: 20000（你已改小为 100，每个 epoch 更短、出 checkpoint 更频繁）
-  eval_valid_sample_count: 16000    # 保持 8g_optimized 设置
+  max_steps_per_epoch: 20000       # 原 8g_optimized: 20000
+  eval_valid_sample_count: 30000   # 原 8g_optimized: 8000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  # ===== 仅按要求改动 batch_size 与等效批 =====
-  batch_size: 96             # 原 8g_optimized: 1。注意：双卡 DDP 是“每卡”批 → 等效批 = 96×2 = 192
-  eval_batch_size: 256        # 原 8g_optimized: 2。仅 rank0/no_grad（吞吐项）。⚠ 256 偏大，whisper 全注意力显存随 batch 涨，eval 易 OOM，建议 96~128
+  # ============================================================
+  # 4×L20(48G) 四卡 DDP 核心配置
+  #   等效批 = batch_size(每卡) × 卡数(4) × grad_accum
+  #   稳妥: 48 × 4 × 1 = 192 → lr 1.5e-4（每卡~18G）
+  #   本配置(用满显存): batch_size 96 × 4 × 1 = 384 → lr 2.0e-4，warmup 0.08
+  # ============================================================
+  batch_size: 96             # 每卡 96（4卡等效批 384）。原 8g_optimized: 1
+  eval_batch_size: 256       # 仅 rank0/no_grad（单卡48G）。256 在 48G 上一般够；若 eval 阶段 OOM 降到 128
   log_every_steps: 40
 
-  # 有效批 = batch_size × 卡数 × grad_accum。双卡: 96×2×1 = 192（若想要等效批 96，把 batch_size 改回 48）
   gradient_accumulation_steps: 1   # 原 8g_optimized: 8
 
   # lr 按等效批 sqrt 缩放（AdamW 推荐）：lr = 3e-5 × sqrt(等效批 / 8)。
-  #   等效批 8(原始)→3e-5；48→~7e-5；96→~1.0e-4；192→~1.5e-4。
-  # 当前 1.0e-4 对应“等效批 96”(= batch_size 48 × 双卡)。
-  # ⚠ 若 batch_size 保持 96/卡(等效批 192)，应把 lr 提到 ~1.5e-4。
-  learning_rate: 1.0e-4      # 原 8g_optimized: 3e-5（等效批8）；随等效批增大上调，见上方注释
-  warmup_ratio: 0.05         # 保持 8g_optimized 设置
+  #   等效批 8(原始)→3e-5；192→~1.5e-4；384→~2.0e-4。
+  # 当前 2.0e-4 对应“等效批 384”(= batch_size 96 × 四卡)。若改回 batch_size 48(等效192)，lr 用 1.5e-4。
+  learning_rate: 2.0e-4      # 原 8g_optimized: 3e-5（等效批8）；等效批384按 sqrt 缩放：3e-5×√(384/8)≈2.08e-4
+  warmup_ratio: 0.08         # 原 8g_optimized: 0.05；等效批384增大，warmup 提到 0.08 更稳
   ema_decay: 0.995           # 保持 8g_optimized 设置
   weight_decay: 0.01
   grad_clip_norm: 1.0
   use_amp: true
   save_metric: best_f1       # 排序指标：验证集 macro best-F1（各标签用各自最优阈值的 F1 再平均）
-  best_checkpoint_name: best_lmf_ensemble.pt   # 原 8g_optimized: best_lmf_optimized.pt
+  best_checkpoint_name: best_lmf_ensemble.pt   # 原 8g_optimized: best_lmf_optimized.pt（已在独立的 4xL20 目录下）
   early_stop_patience: 15    # 保持 8g_optimized 设置
 
   # 集成推理：除最优模型外，再按 valid best_f1 排名保留 top-N 个 checkpoint。
@@ -118,6 +121,5 @@ env:
   TRANSFORMERS_CACHE: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
   TORCH_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/torch
   # 模型已在本地，强制离线，避免任何联网探测
-  # 原 8g_optimized: HF 缓存在 D:/bisai/V2/...，并设 HF_ENDPOINT=https://hf-mirror.com 走镜像下载
   HF_HUB_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
