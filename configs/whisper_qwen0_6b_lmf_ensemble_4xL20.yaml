@@ -79,7 +79,7 @@ train:
   label_smoothing: 0.05      # 保持 8g_optimized 设置
 
   epochs: 80
-  max_steps_per_epoch: 20000       # 原 8g_optimized: 20000
+  max_steps_per_epoch: 1000       # 原 8g_optimized: 20000
   eval_valid_sample_count: 30000   # 原 8g_optimized: 8000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
@@ -87,20 +87,21 @@ train:
   # ============================================================
   # 4×L20(48G) 四卡 DDP 核心配置
   #   等效批 = batch_size(每卡) × 卡数(4) × grad_accum
-  #   稳妥: 48 × 4 × 1 = 192 → lr 1.5e-4（每卡~18G）
-  #   本配置(用满显存): batch_size 96 × 4 × 1 = 384 → lr 2.0e-4，warmup 0.08
+  #   稳妥:   48  × 4 × 1 = 192 → lr 1.5e-4（每卡~18G）
+  #   较大:   96  × 4 × 1 = 384 → lr 2.0e-4，warmup 0.08
+  #   本配置: 128 × 4 × 1 = 512 → lr 2.4e-4，warmup 0.10（每卡~28-30G，建议先冒烟测显存）
   # ============================================================
-  batch_size: 96             # 每卡 96（4卡等效批 384）。原 8g_optimized: 1
+  batch_size: 128            # 每卡 128（4卡等效批 512）。原 8g_optimized: 1。每卡约 28-30G，先冒烟测；OOM 则降到 96
   eval_batch_size: 256       # 仅 rank0/no_grad（单卡48G）。256 在 48G 上一般够；若 eval 阶段 OOM 降到 128
   log_every_steps: 40
 
   gradient_accumulation_steps: 1   # 原 8g_optimized: 8
 
   # lr 按等效批 sqrt 缩放（AdamW 推荐）：lr = 3e-5 × sqrt(等效批 / 8)。
-  #   等效批 8(原始)→3e-5；192→~1.5e-4；384→~2.0e-4。
-  # 当前 2.0e-4 对应“等效批 384”(= batch_size 96 × 四卡)。若改回 batch_size 48(等效192)，lr 用 1.5e-4。
-  learning_rate: 2.0e-4      # 原 8g_optimized: 3e-5（等效批8）；等效批384按 sqrt 缩放：3e-5×√(384/8)≈2.08e-4
-  warmup_ratio: 0.08         # 原 8g_optimized: 0.05；等效批384增大，warmup 提到 0.08 更稳
+  #   等效批 8(原始)→3e-5；192→~1.5e-4；384→~2.0e-4；512→~2.4e-4。
+  # 当前 2.4e-4 对应“等效批 512”(= batch_size 128 × 四卡)。改回 96→2.0e-4，48→1.5e-4。
+  learning_rate: 2.4e-4      # 原 8g_optimized: 3e-5（等效批8）；等效批512按 sqrt 缩放：3e-5×√(512/8)=2.4e-4
+  warmup_ratio: 0.10         # 原 8g_optimized: 0.05；等效批512增大，warmup 提到 0.10 更稳
   ema_decay: 0.995           # 保持 8g_optimized 设置
   weight_decay: 0.01
   grad_clip_norm: 1.0
