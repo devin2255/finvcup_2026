@@ -75,7 +75,7 @@ train:
   label_smoothing: 0.05
 
   epochs: 40                       # 原 4xL20: 80。cosine 总长按 40 算，lr 才会真正衰减到接近 0
-  max_steps_per_epoch: 3000
+  max_steps_per_epoch: 500
   eval_valid_sample_count: 30000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
