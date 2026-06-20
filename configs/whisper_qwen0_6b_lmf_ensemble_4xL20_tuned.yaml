@@ -1,0 +1,116 @@
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8
+
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125
+  max_context_chunks: 375
+  context_prob: 0.5
+
+# ============================================================
+# 4×L20(48G) 四卡 DDP —— 调好 lr 调度版（修复大批量退化）+ 权重 EMA。
+# 输出目录独立（lmf_ensemble_4xL20_tuned），不影响正在跑的 4xL20 run。
+# ============================================================
+paths:
+  project_root: /mnt/workspace/dorihue/finvcup_2026
+  train_audio_dir: /mnt/workspace/dorihue/finvcup_2026/train/audio
+  train_text_dir: /mnt/workspace/dorihue/finvcup_2026/train/text
+  train_labels_dir: /mnt/workspace/dorihue/finvcup_2026/train/labels
+
+  output_root: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble_4xL20_tuned
+  checkpoints_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble_4xL20_tuned/checkpoints
+  logs_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_ensemble_4xL20_tuned/logs
+
+  cache_root: /mnt/workspace/dorihue/finvcup_2026/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: /mnt/workspace/dorihue/modelscope/whisper-large-v3  # 本地路径，注意核对文件夹真实名字
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2
+  tail_ratio: 0.25
+
+text_encoder:
+  model_name: /mnt/workspace/dorihue/modelscope/Qwen3-0.6B  # 本地路径
+  max_length: 256
+  freeze_backbone: true
+
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 40                       # 原 4xL20: 80。cosine 总长按 40 算，lr 才会真正衰减到接近 0
+  max_steps_per_epoch: 3000
+  eval_valid_sample_count: 30000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  # 有效批 = batch_size(每卡128) × 4卡 × grad_accum(1) = 512（不变）
+  batch_size: 128
+  eval_batch_size: 256
+  log_every_steps: 40
+  gradient_accumulation_steps: 1
+
+  # ===== lr 调度修复（核心）=====
+  # 上一版 2.4e-4 + warmup 0.10：warmup 长达 ~7 epoch，lr 还在爬时 valid 就已过峰，
+  # 实测 lr>~1.7e-4 即退化。这里把峰值压到 1.2e-4、warmup 缩到 0.03，让模型快速到峰后
+  # 进入 cosine 衰减做精收敛。
+  learning_rate: 1.2e-4            # 原 4xL20: 2.4e-4（实测过高）
+  warmup_ratio: 0.03              # 原 4xL20: 0.10（过长）
+  weight_decay: 0.03              # 原: 0.01。补正则，替代大批量丢掉的梯度噪声
+  ema_decay: 0.999                # 原: 0.995。权重 EMA 的衰减（窗口~1000 step）；想更平滑可调 0.9995
+  grad_clip_norm: 1.0
+  use_amp: true
+
+  # ===== 权重 EMA（关键新增）=====
+  # 对可训练参数做指数滑动平均，评估/保存 best 与 ensemble 成员时用 EMA 权重 —— 闭合大批量
+  # 泛化间隙最有效的手段之一。仅 rank0 维护，推理无需改动（infer 仍读 ckpt["model"]）。
+  use_ema: true                   # 原: 未设置（=false，不启用）
+
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_ensemble.pt
+  early_stop_patience: 15
+
+  ensemble_topk: 5
+
+env:
+  HF_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
+  TRANSFORMERS_CACHE: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
+  TORCH_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"

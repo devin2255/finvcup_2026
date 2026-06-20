@@ -139,6 +139,55 @@ def _trainable_state_dict(model) -> dict:
     }
 
 
+class EMA:
+    """Exponential moving average of the model's *trainable* parameters.
+
+    Why trainable-only: the frozen Whisper/Qwen backbones never change, so an
+    EMA of them equals themselves — shadowing them would just waste ~5GB. We
+    average only the fine-tuned params (~50M). Maintained on rank0 only; under
+    DDP all ranks hold identical params right after each optimizer step, so
+    rank0's EMA is valid for the whole job.
+
+    Per epoch end (rank0):
+        ema.store_and_copy_to(model)   # 备份原权重，把 EMA 权重写入模型
+        ... evaluate / 存 best & ensemble（此时捕获的就是 EMA 权重）...
+        ema.restore(model)             # 还原原权重，下个 epoch 从原权重继续训练
+    """
+
+    def __init__(self, model, decay):
+        self.decay = float(decay)
+        self.shadow = {
+            n: p.detach().clone()
+            for n, p in model.named_parameters() if p.requires_grad
+        }
+        self._backup = None
+
+    @torch.no_grad()
+    def update(self, model, step):
+        # 早期用较小 decay 快速跟随，逐步逼近目标 decay（避免初始权重污染 EMA）。
+        d = min(self.decay, (1.0 + step) / (10.0 + step))
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self.shadow:
+                self.shadow[n].mul_(d).add_(p.detach(), alpha=1.0 - d)
+
+    @torch.no_grad()
+    def store_and_copy_to(self, model):
+        self._backup = {}
+        for n, p in model.named_parameters():
+            if p.requires_grad and n in self.shadow:
+                self._backup[n] = p.detach().clone()
+                p.data.copy_(self.shadow[n])
+
+    @torch.no_grad()
+    def restore(self, model):
+        if self._backup is None:
+            return
+        for n, p in model.named_parameters():
+            if n in self._backup:
+                p.data.copy_(self._backup[n])
+        self._backup = None
+
+
 def main():
     args = parse_args()
     cfg = load_config(args.config)
@@ -378,6 +427,15 @@ def main():
         start_epoch = int(ckpt["epoch"]) + 1
         best_metric = float(ckpt.get("best_metric", -math.inf))
 
+    # 权重 EMA（仅可训练参数，rank0）。在 resume 之后创建，shadow 从已加载权重起步。
+    # 注：保存的 best/ensemble 权重是 EMA 版（推理更稳）；--resume 会从 EMA 权重热启动，
+    #     与原始权重略有出入，但训练能很快恢复（fresh run 不受影响）。
+    raw_model = model.module if hasattr(model, "module") else model
+    use_ema = bool(cfg["train"].get("use_ema", False))
+    ema = EMA(raw_model, cfg["train"].get("ema_decay", 0.999)) if (use_ema and is_main) else None
+    if use_ema and is_main:
+        print(f"[EMA] enabled, decay={float(cfg['train'].get('ema_decay', 0.999))}")
+
     grad_clip = float(cfg["train"]["grad_clip_norm"])
     use_amp = bool(cfg["train"]["use_amp"])
     save_metric = str(cfg["train"]["save_metric"])
@@ -471,6 +529,8 @@ def main():
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 update_step += 1
+                if ema is not None:
+                    ema.update(raw_model, global_train_step)
             else:
                 grad_norm = float("nan")
 
@@ -513,6 +573,8 @@ def main():
         skip_epoch_end_eval = False
 
         if is_main:
+            if ema is not None:
+                ema.store_and_copy_to(raw_model)  # 用 EMA 权重做评估与保存
             eval_model = model.module if hasattr(model, "module") else model
             metrics_valid = evaluate(
                 eval_model,
@@ -623,8 +685,12 @@ def main():
                 save_json(Path(paths["logs_dir"]) / "best_thresholds.json", {"thresholds": valid_thresholds})
             else:
                 bad_epochs += 1
-                if bad_epochs >= early_stop_patience:
-                    break
+
+            if ema is not None:
+                ema.restore(raw_model)  # 还原原始权重，下个 epoch 从原始权重继续训练
+
+            if bad_epochs >= early_stop_patience:
+                break
 
         if is_distributed():
             torch.distributed.barrier()
