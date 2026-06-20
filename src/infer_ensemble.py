@@ -149,7 +149,11 @@ def main():
     collate_fn = build_collate_fn(tokenizer, int(cfg["text_encoder"]["max_length"]))
 
     test_root = Path(args.test_root)
-    ds = TurnTakingTestDataset(test_root=test_root, sample_rate=int(cfg["sample_rate"]))
+    ds = TurnTakingTestDataset(
+        test_root=test_root,
+        sample_rate=int(cfg["sample_rate"]),
+        context_chunks=int(cfg["context_chunks"]),  # 归一化变长上下文到定长，支持复赛 (0,30] 动态时长
+    )
     bs = int(args.batch_size or cfg["train"]["eval_batch_size"])
     loader = DataLoader(
         ds,

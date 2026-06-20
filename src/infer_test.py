@@ -64,7 +64,11 @@ def main():
     label_cols = [x.lower() for x in multi_targets]
 
     test_root = Path(args.test_root)
-    ds = TurnTakingTestDataset( test_root=test_root, sample_rate=int(cfg["sample_rate"]))
+    ds = TurnTakingTestDataset(
+        test_root=test_root,
+        sample_rate=int(cfg["sample_rate"]),
+        context_chunks=int(cfg["context_chunks"]),  # 归一化变长上下文到定长，支持复赛 (0,30] 动态时长
+    )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(cfg["text_encoder"]["model_name"], use_fast=True)

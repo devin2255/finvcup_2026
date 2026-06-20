@@ -279,12 +279,17 @@ class TurnTakingTrainDataset(Dataset):
 
 
 class TurnTakingTestDataset(Dataset):
+    # 上下文标签的 padding 值（与训练 TurnTakingTrainDataset 一致：labels.NA = 4）。
+    PAD_LABEL = 4
+
     def __init__(
         self,
         test_root: Path,
         sample_rate: int,
+        context_chunks: int = 375,
     ) -> None:
         self.sample_rate = sample_rate
+        self.context_chunks = int(context_chunks)
         self.base = test_root
         self.audio_dir = self.base / "audio"
         self.text_dir = self.base / "text"
@@ -302,6 +307,18 @@ class TurnTakingTestDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict:
         seg_id = self.segment_ids[idx]
         context_labels = np.load(self.context_dir / f"{seg_id}.npy").astype(np.int64)
+        # 归一化到固定 context_chunks（与训练 TurnTakingTrainDataset 完全一致）：
+        # 截取最后 N 个 chunk；不足则前面用 NA=4 补齐。复赛上下文为 (0,30] 动态时长，
+        # 这样无论官方落盘是定长 375 还是变长，batch 内长度都统一且 >= tail_k，
+        # 不会在 collate 的 torch.stack 或模型 ContextLabelEncoder 的 tail 分支处报错。
+        N = self.context_chunks
+        L = len(context_labels)
+        if L >= N:
+            context_labels = context_labels[-N:]
+        else:
+            context_labels = np.concatenate(
+                [np.full(N - L, self.PAD_LABEL, dtype=np.int64), context_labels]
+            )
         text_json = self._load_text_json(seg_id)
         start_ms = int(text_json.get("start_ms", 0))
         end_ms = int(text_json.get("end_ms", 30000))
