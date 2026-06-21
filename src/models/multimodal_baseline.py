@@ -616,13 +616,23 @@ class MultimodalTurnTakingModel(nn.Module):
             nn.Linear(self.fusion.out_dim, self.num_targets),
         )
 
+        # VAP 辅助头（多任务，仅训练用）：从融合表征投影未来双声道语音活动
+        # [2 声道 × vap_bins]。推理不调用，不进提交、不占参数预算。
+        vap_cfg = cfg.get("vap_aux", {}) or {}
+        self.use_vap = bool(vap_cfg.get("enabled", False))
+        if self.use_vap:
+            self.vap_channels = 2
+            self.vap_bins = int(vap_cfg.get("bins", cfg.get("target_chunks", 25)))
+            self.vap_head = nn.Linear(self.fusion.out_dim, self.vap_channels * self.vap_bins)
+
     def forward(
         self,
         waveform: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         context_labels: torch.Tensor,
-    ) -> torch.Tensor:
+        return_vap: bool = False,
+    ):
         audio_feat = self.audio_encoder(waveform)
         text_feat = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         context_feat = self.context_encoder(context_labels=context_labels)
@@ -630,5 +640,7 @@ class MultimodalTurnTakingModel(nn.Module):
         fused = self.fusion(audio_feat, text_feat, context_feat, hand_feat)
         logits = self.head(fused)
         if self.num_targets == 1:
-            return logits.squeeze(-1)
+            logits = logits.squeeze(-1)
+        if return_vap and getattr(self, "use_vap", False):
+            return logits, self.vap_head(fused)  # vap_logits: [B, 2*vap_bins]
         return logits

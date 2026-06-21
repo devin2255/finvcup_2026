@@ -268,6 +268,14 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
     collate_fn = build_collate_fn(tokenizer, int(cfg["text_encoder"]["max_length"]))
 
+    vap_cfg = cfg.get("vap_aux", {}) or {}
+    use_vap = bool(vap_cfg.get("enabled", False))
+    vap_weight = float(vap_cfg.get("weight", 0.3))
+    vap_bins = int(vap_cfg.get("bins", cfg.get("target_chunks", 25)))
+    vad_log_offset = float(vap_cfg.get("vad_log_offset", 2.0))
+    if is_main and use_vap:
+        print(f"[VAP] aux head enabled: weight={vap_weight}, bins={vap_bins}, vad_log_offset={vad_log_offset}")
+
     train_dataset = TurnTakingTrainDataset(
         samples=train_samples,
         train_audio_dir=train_audio_dir,
@@ -283,6 +291,9 @@ def main():
         min_context_chunks=cfg.get("data_augmentation", {}).get("min_context_chunks", 125),
         max_context_chunks=cfg.get("data_augmentation", {}).get("max_context_chunks", 375),
         context_prob=cfg.get("data_augmentation", {}).get("context_prob", 0.5),
+        vap_target=use_vap,
+        vap_bins=vap_bins,
+        vad_log_offset=vad_log_offset,
     )
     valid_dataset = TurnTakingTrainDataset(
         samples=valid_eval_samples,
@@ -380,6 +391,9 @@ def main():
     else:
         criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
+    # VAP 辅助损失（多任务）。仅 use_vap 时启用，对未来双声道 VA 做 BCE。
+    vap_criterion = torch.nn.BCEWithLogitsLoss() if use_vap else None
+
     max_steps_per_epoch_cfg = cfg["train"].get("max_steps_per_epoch", None)
     max_steps_per_epoch = (
         int(max_steps_per_epoch_cfg) if max_steps_per_epoch_cfg is not None else None
@@ -476,14 +490,31 @@ def main():
             context_labels = batch["context_labels"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
 
+            vap_target = batch.get("vap_target")
+            if vap_target is not None:
+                vap_target = vap_target.to(device, non_blocking=True)
+
             with torch.amp.autocast("cuda", enabled=use_amp):
-                logits = model(
-                    waveform=waveform,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    context_labels=context_labels,
-                )
-                loss = criterion(logits, labels) / accum_steps
+                if use_vap:
+                    logits, vap_logits = model(
+                        waveform=waveform,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        context_labels=context_labels,
+                        return_vap=True,
+                    )
+                    main_loss = criterion(logits, labels)
+                    # vap_target [B,2,bins] -> [B,2*bins]，与 vap_head 输出对齐
+                    vap_loss = vap_criterion(vap_logits, vap_target.flatten(1))
+                    loss = (main_loss + vap_weight * vap_loss) / accum_steps
+                else:
+                    logits = model(
+                        waveform=waveform,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        context_labels=context_labels,
+                    )
+                    loss = criterion(logits, labels) / accum_steps
 
             if not torch.isfinite(loss):
                 if is_main:

@@ -170,6 +170,9 @@ class TurnTakingTrainDataset(Dataset):
         min_context_chunks: int = 125,
         max_context_chunks: int = 375,
         context_prob: float = 0.5,
+        vap_target: bool = False,
+        vap_bins: int = 25,
+        vad_log_offset: float = 2.0,
     ) -> None:
         self.samples = list(samples)
         self.train_audio_dir = train_audio_dir
@@ -185,6 +188,10 @@ class TurnTakingTrainDataset(Dataset):
         self.min_context_chunks = min_context_chunks
         self.max_context_chunks = max_context_chunks
         self.context_prob = context_prob
+        # VAP 辅助目标（仅训练）：未来 target_chunks 的双声道语音活动 [2, vap_bins]
+        self.vap_target = vap_target
+        self.vap_bins = int(vap_bins)
+        self.vad_log_offset = float(vad_log_offset)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -233,6 +240,40 @@ class TurnTakingTrainDataset(Dataset):
             wave[:, mask_start:mask_start + mask_len] = 0
         return wave
 
+    def _chunk_log_energy(self, x: torch.Tensor, spc: int) -> torch.Tensor:
+        """每 spc 个采样点一个 chunk 的对数能量。x:[T] -> [n_chunks]"""
+        n = x.shape[0] // spc
+        if n == 0:
+            return x.new_zeros(0)
+        frames = x[: n * spc].reshape(n, spc)
+        return torch.log(frames.pow(2).mean(dim=1) + 1e-8)
+
+    def _future_va_grid(self, wave_ctx: torch.Tensor, wave_fut: torch.Tensor) -> torch.Tensor:
+        """VAP 目标：未来双声道语音活动 [2, vap_bins]（能量级 VAD）。
+        每声道用 ctx+fut 的低分位做自适应噪声底（抵消增益差异），fut 每 chunk
+        能量 > 底 + vad_log_offset 判为有声。bins<n_chunks 时按"任一 chunk 有声"聚合。
+        仅训练用，靠未来音频构造监督；推理不需要、不破坏 causal 约束。
+        """
+        spc = int(self.chunk_ms * self.sample_rate / 1000)
+        n_chunks = self.target_chunks
+        va = torch.zeros(2, n_chunks)
+        for ch in range(min(2, wave_fut.shape[0])):
+            loge_fut = self._chunk_log_energy(wave_fut[ch], spc)
+            if loge_fut.numel() < n_chunks:
+                pad_v = float(loge_fut.min()) if loge_fut.numel() > 0 else -18.0
+                loge_fut = torch.nn.functional.pad(
+                    loge_fut, (0, n_chunks - loge_fut.numel()), value=pad_v
+                )
+            loge_fut = loge_fut[:n_chunks]
+            loge_ctx = self._chunk_log_energy(wave_ctx[ch], spc)
+            ref = torch.cat([t for t in (loge_ctx, loge_fut) if t.numel() > 0])
+            floor = torch.quantile(ref, 0.2)
+            va[ch] = (loge_fut > (floor + self.vad_log_offset)).float()
+        if self.vap_bins != n_chunks and n_chunks % self.vap_bins == 0:
+            per = n_chunks // self.vap_bins
+            va = va.reshape(2, self.vap_bins, per).amax(dim=2)
+        return va  # [2, vap_bins]
+
     def __getitem__(self, idx: int) -> Dict:
         sample = self.samples[idx]
         labels = self._load_labels(sample.conv_id)
@@ -262,6 +303,14 @@ class TurnTakingTrainDataset(Dataset):
         text_json = self._load_text_json(sample.conv_id)
         text = build_text_context(text_json.get("utterances", []), start_ms, end_ms)
         wave = self._load_wave_segment(sample.conv_id, start_ms, end_ms)
+
+        vap_grid = None
+        if self.vap_target:
+            # 从未增广的 clean 上下文 + 未来 2s 估双声道 VA（VAD 阈值靠 clean 音频）
+            fut_end_ms = end_ms + self.target_chunks * self.chunk_ms
+            wave_fut = self._load_wave_segment(sample.conv_id, end_ms, fut_end_ms)
+            vap_grid = self._future_va_grid(wave, wave_fut)
+
         wave = self._augment_audio(wave)
 
         out = {
@@ -271,6 +320,8 @@ class TurnTakingTrainDataset(Dataset):
             "text": text,
             "context_labels": torch.from_numpy(context_labels),
         }
+        if vap_grid is not None:
+            out["vap_target"] = vap_grid
         if hasattr(sample, "label_vec"):
             out["label"] = torch.tensor(sample.label_vec, dtype=torch.float32)
         else:
@@ -377,6 +428,9 @@ class CollateFn:
             "attention_mask": tokenized["attention_mask"],
             "context_labels": torch.stack([b["context_labels"] for b in batch], dim=0),
         }
+
+        if "vap_target" in batch[0]:
+            out["vap_target"] = torch.stack([b["vap_target"] for b in batch], dim=0)
 
         if "label" in batch[0]:
             out["label"] = torch.stack([b["label"] for b in batch], dim=0)
