@@ -625,6 +625,20 @@ class MultimodalTurnTakingModel(nn.Module):
             self.vap_bins = int(vap_cfg.get("bins", cfg.get("target_chunks", 25)))
             self.vap_head = nn.Linear(self.fusion.out_dim, self.vap_channels * self.vap_bins)
 
+        # VAP 特征晚融合（第5模态）：预计算的话轮先验投影后与融合表征拼接，再过一层回到 hidden。
+        # 推理不带 vap_feat 时用零向量，架构一致、不崩。
+        vf_cfg = cfg.get("vap_feat", {}) or {}
+        self.use_vap_feat = bool(vf_cfg.get("enabled", False))
+        if self.use_vap_feat:
+            self.vap_feat_dim = int(vf_cfg.get("feat_dim", 18))
+            _h = self.fusion.out_dim
+            self.vap_feat_proj = nn.Sequential(
+                nn.Linear(self.vap_feat_dim, _h), nn.LayerNorm(_h), nn.GELU(),
+            )
+            self.vap_feat_merge = nn.Sequential(
+                nn.Linear(_h * 2, _h), nn.LayerNorm(_h), nn.GELU(),
+            )
+
     def forward(
         self,
         waveform: torch.Tensor,
@@ -632,12 +646,18 @@ class MultimodalTurnTakingModel(nn.Module):
         attention_mask: torch.Tensor,
         context_labels: torch.Tensor,
         return_vap: bool = False,
+        vap_feat=None,
     ):
         audio_feat = self.audio_encoder(waveform)
         text_feat = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         context_feat = self.context_encoder(context_labels=context_labels)
         hand_feat = self.hand_features(context_labels)
         fused = self.fusion(audio_feat, text_feat, context_feat, hand_feat)
+        if getattr(self, "use_vap_feat", False):
+            if vap_feat is None:
+                vap_feat = fused.new_zeros(fused.shape[0], self.vap_feat_dim)
+            v = self.vap_feat_proj(vap_feat.to(fused.dtype))
+            fused = self.vap_feat_merge(torch.cat([fused, v], dim=-1))
         logits = self.head(fused)
         if self.num_targets == 1:
             logits = logits.squeeze(-1)

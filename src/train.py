@@ -64,6 +64,9 @@ def evaluate(
         attention_mask = batch["attention_mask"].to(device, non_blocking=True)
         context_labels = batch["context_labels"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
+        vap_feat = batch.get("vap_feat")
+        if vap_feat is not None:
+            vap_feat = vap_feat.to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
             logits = model(
@@ -71,6 +74,7 @@ def evaluate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 context_labels=context_labels,
+                vap_feat=vap_feat,
             )
 
         probs = torch.sigmoid(logits)
@@ -276,6 +280,14 @@ def main():
     if is_main and use_vap:
         print(f"[VAP] aux head enabled: weight={vap_weight}, bins={vap_bins}, vad_log_offset={vad_log_offset}")
 
+    vapfeat_cfg = cfg.get("vap_feat", {}) or {}
+    use_vap_feat = bool(vapfeat_cfg.get("enabled", False))
+    vap_feat_dir = vapfeat_cfg.get("cache_dir") if use_vap_feat else None
+    vap_feat_rate = float(vapfeat_cfg.get("frame_rate", 10.0))
+    vap_feat_dim_cfg = int(vapfeat_cfg.get("feat_dim", 18))
+    if is_main and use_vap_feat:
+        print(f"[VAP-feat] enabled: cache_dir={vap_feat_dir}, frame_rate={vap_feat_rate}, dim={vap_feat_dim_cfg}")
+
     train_dataset = TurnTakingTrainDataset(
         samples=train_samples,
         train_audio_dir=train_audio_dir,
@@ -294,6 +306,9 @@ def main():
         vap_target=use_vap,
         vap_bins=vap_bins,
         vad_log_offset=vad_log_offset,
+        vap_feat_dir=vap_feat_dir,
+        vap_frame_rate=vap_feat_rate,
+        vap_feat_dim=vap_feat_dim_cfg,
     )
     valid_dataset = TurnTakingTrainDataset(
         samples=valid_eval_samples,
@@ -307,6 +322,9 @@ def main():
         augment_audio=False,
         # 验证集不使用动态上下文
         dynamic_context=False,
+        vap_feat_dir=vap_feat_dir,
+        vap_frame_rate=vap_feat_rate,
+        vap_feat_dim=vap_feat_dim_cfg,
     )
 
     train_sampler = (
@@ -493,6 +511,9 @@ def main():
             vap_target = batch.get("vap_target")
             if vap_target is not None:
                 vap_target = vap_target.to(device, non_blocking=True)
+            vap_feat = batch.get("vap_feat")
+            if vap_feat is not None:
+                vap_feat = vap_feat.to(device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 if use_vap:
@@ -502,6 +523,7 @@ def main():
                         attention_mask=attention_mask,
                         context_labels=context_labels,
                         return_vap=True,
+                        vap_feat=vap_feat,
                     )
                     main_loss = criterion(logits, labels)
                     # vap_target [B,2,bins] -> [B,2*bins]，与 vap_head 输出对齐
@@ -513,6 +535,7 @@ def main():
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         context_labels=context_labels,
+                        vap_feat=vap_feat,
                     )
                     loss = criterion(logits, labels) / accum_steps
 

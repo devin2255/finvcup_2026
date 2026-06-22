@@ -173,6 +173,9 @@ class TurnTakingTrainDataset(Dataset):
         vap_target: bool = False,
         vap_bins: int = 25,
         vad_log_offset: float = 2.0,
+        vap_feat_dir: Optional[str] = None,
+        vap_frame_rate: float = 10.0,
+        vap_feat_dim: int = 18,
     ) -> None:
         self.samples = list(samples)
         self.train_audio_dir = train_audio_dir
@@ -192,6 +195,10 @@ class TurnTakingTrainDataset(Dataset):
         self.vap_target = vap_target
         self.vap_bins = int(vap_bins)
         self.vad_log_offset = float(vad_log_offset)
+        # VAP 特征(预计算)：晚融合第5模态，按 end_idx 映射到 vap 帧读取
+        self.vap_feat_dir = Path(vap_feat_dir) if vap_feat_dir else None
+        self.vap_frame_rate = float(vap_frame_rate)
+        self.vap_feat_dim = int(vap_feat_dim)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -204,6 +211,16 @@ class TurnTakingTrainDataset(Dataset):
     def _load_text_json(self, conv_id: str) -> Dict:
         with open(self.train_text_dir / f"{conv_id}.json", "r", encoding="utf-8") as f:
             return json.load(f)
+
+    @lru_cache(maxsize=64)
+    def _load_vap_feats(self, conv_id: str):
+        """读该会话预计算的 VAP 逐帧特征 [F, feat_dim]；缺失返回 None。"""
+        if self.vap_feat_dir is None:
+            return None
+        path = self.vap_feat_dir / f"{conv_id}.npy"
+        if not path.exists():
+            return None
+        return np.load(path)
 
     def _load_wave_segment(self, conv_id: str, start_ms: int, end_ms: int) -> torch.Tensor:
         wav_path = self.train_audio_dir / f"{conv_id}.wav"
@@ -322,6 +339,14 @@ class TurnTakingTrainDataset(Dataset):
         }
         if vap_grid is not None:
             out["vap_target"] = vap_grid
+        if self.vap_feat_dir is not None:
+            arr = self._load_vap_feats(sample.conv_id)
+            vf = np.zeros(self.vap_feat_dim, dtype=np.float32)
+            if arr is not None and arr.shape[0] > 0:
+                fr = int(round(end_idx * self.chunk_ms * self.vap_frame_rate / 1000.0))
+                fr = min(max(fr, 0), arr.shape[0] - 1)
+                vf = np.asarray(arr[fr], dtype=np.float32)
+            out["vap_feat"] = torch.from_numpy(vf)
         if hasattr(sample, "label_vec"):
             out["label"] = torch.tensor(sample.label_vec, dtype=torch.float32)
         else:
@@ -431,6 +456,9 @@ class CollateFn:
 
         if "vap_target" in batch[0]:
             out["vap_target"] = torch.stack([b["vap_target"] for b in batch], dim=0)
+
+        if "vap_feat" in batch[0]:
+            out["vap_feat"] = torch.stack([b["vap_feat"] for b in batch], dim=0)
 
         if "label" in batch[0]:
             out["label"] = torch.stack([b["label"] for b in batch], dim=0)
