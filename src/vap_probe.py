@@ -59,14 +59,19 @@ def dump_value(name, v, depth=0):
 
 
 def load_2ch_tail(wav_path: str, context_sec: float, target_sr: int = 16000):
-    """读 wav，重采样到 16k，取最后 context_sec 秒，返回两路 [1,1,T] tensor。"""
-    import torchaudio
-    w, sr = torchaudio.load(wav_path)  # [C, T]
+    """读 wav，取最后 context_sec 秒，返回两路 [1,1,T] tensor。
+
+    用项目自带的 _read_wav_slice（纯 `wave` 标准库），绕开 torchaudio.load/torchcodec
+    在该环境的 libtorchcodec 加载问题。"""
+    from src.data.dataset import _read_wav_slice
+    data, sr = _read_wav_slice(Path(wav_path), 0, 10 ** 9)  # [T, C] in [-1,1]，读到文件末尾
+    w = torch.from_numpy(data.T.copy())  # [C, T]
     if w.shape[0] == 1:
         w = w.repeat(2, 1)
     elif w.shape[0] > 2:
         w = w[:2]
     if sr != target_sr:
+        import torchaudio  # functional.resample 是张量算子，不触发 torchcodec
         w = torchaudio.functional.resample(w, sr, target_sr)
     n = int(context_sec * target_sr)
     if w.shape[1] > n:
