@@ -1,6 +1,7 @@
 # Large dataset directories — do not commit
 train/
 test/
+outputs/
 
 # Python cache
 __pycache__/
@@ -33,3 +34,4 @@ events.out.tfevents.*
 # OS files
 .DS_Store
 Thumbs.db
+.idea
