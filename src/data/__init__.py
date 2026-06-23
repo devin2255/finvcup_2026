@@ -6,6 +6,7 @@ from .dataset import (
     build_train_samples,
     build_train_samples_multitask,
     list_conv_ids,
+    resolve_test_root,
     split_conversation_ids,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "build_train_samples",
     "build_train_samples_multitask",
     "list_conv_ids",
+    "resolve_test_root",
     "split_conversation_ids",
 ]

@@ -1,6 +1,8 @@
 # Large dataset directories — do not commit
 train/
 test/
+outputs/
+test_data/
 
 # Python cache
 __pycache__/
@@ -33,3 +35,8 @@ events.out.tfevents.*
 # OS files
 .DS_Store
 Thumbs.db
+.idea
+
+# Docker 构建暂存目录（模型权重 + 成员 checkpoint，体积大，勿提交）
+docker_assets/
+_submit_out/

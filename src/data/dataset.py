@@ -278,6 +278,41 @@ class TurnTakingTrainDataset(Dataset):
         return out
 
 
+_REQUIRED_TEST_DIRS = ("audio", "text", "context")
+
+
+def resolve_test_root(path: Path) -> Path:
+    """
+    解析测试集根目录，兼容两种常见布局（与官方 baseline 一致）：
+    1) <root>/audio, <root>/text, <root>/context（直接挂载，如 PDF 的 /xydata/{audio,text,context}）
+    2) <root>/<split>/audio,...（挂载父目录时自动进入唯一子目录）
+    复赛若把私有测试集挂成嵌套一层的布局，这里会自动下钻，避免找到 0 条样本写出空 CSV。
+    """
+    root = Path(path).expanduser().resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"test_root not found: {root}")
+
+    def _has_layout(base: Path) -> bool:
+        return all((base / name).is_dir() for name in _REQUIRED_TEST_DIRS)
+
+    if _has_layout(root):
+        return root
+
+    candidates = sorted(p for p in root.iterdir() if p.is_dir() and _has_layout(p))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        names = ", ".join(p.name for p in candidates)
+        raise ValueError(
+            f"Ambiguous test_root {root}: multiple splits with audio/text/context: {names}. "
+            "Mount the split directory directly to /xydata."
+        )
+    raise FileNotFoundError(
+        f"Invalid test_root {root}: expected subdirs {list(_REQUIRED_TEST_DIRS)} "
+        f"under root or exactly one child split directory."
+    )
+
+
 class TurnTakingTestDataset(Dataset):
     # 上下文标签的 padding 值（与训练 TurnTakingTrainDataset 一致：labels.NA = 4）。
     PAD_LABEL = 4
@@ -290,7 +325,7 @@ class TurnTakingTestDataset(Dataset):
     ) -> None:
         self.sample_rate = sample_rate
         self.context_chunks = int(context_chunks)
-        self.base = test_root
+        self.base = resolve_test_root(Path(test_root))
         self.audio_dir = self.base / "audio"
         self.text_dir = self.base / "text"
         self.context_dir = self.base / "context"

@@ -1,153 +1,161 @@
-# 第11届FinvCup 对话轮次预测（Turn-Taking）Baseline代码
+# 第11届信也科技杯 · 对话轮次预测（Turn-Taking）复赛方案
 
-Baseline代码实现「过去 30s 音频 + ASR 文本 + 历史标签序列 → 预测未来窗口内话权相关事件」的多模态模型。支持：
+给定过去 ≤30s 的双声道对话（音频 + ASR 文本 + 历史 chunk 标签），预测未来 2s（25×80ms chunk）
+内是否出现 5 类语音事件 `C / NA / I / BC / T`（event-level 多标签，sigmoid + BCE）。
+因果约束：只使用上下文，不读取未来音频或未来标签。
 
-- **分类**：未来 2s（默认 25×80ms chunk）内是否出现 `C` / `NA`  / `T` / `BC` / `I`（与 `positive_ids` 一致）。
-- **多标签**：对 `labels.multi_targets` 中每一类分别预测是否在未来窗口内出现（sigmoid + BCE）。
-本 baseline 固化为 **event-level 多标签**：预测未来 2s（默认 25×80ms chunk）内 5 个标签是否出现（sigmoid + BCE）。
+## 方案概述
 
-因果约束：仅使用配置中的 `context_chunks`（默认 375×80ms=30s）作为上下文，不读取未来音频或未来标签。
+**多模态融合模型**（`src/models/multimodal_baseline.py`）：
 
+| 模态 | 编码器 |
+|------|--------|
+| 音频 | Whisper-large-v3 encoder（冻结，末 2 层微调）+ 注意力池化 |
+| 文本 | Qwen3-0.6B（冻结）+ 尾部注意力池化 |
+| 历史标签 | 标签序列 CNN（tail + full 双分支） |
+| 手工特征 | 标签分布/转移/时间衰减/话轮间隔等统计量 |
 
-## 环境要求
+→ **低秩张量融合 + 自适应门控**（`MultimodalFusion`）→ 5 路 sigmoid 头。
 
-- Linux + NVIDIA GPU（训练默认 4 卡 DDP，可改）
-- Python 3.10 推荐
-- PyTorch / torchaudio / transformers 需与 CUDA 版本匹配（见下）
+**训练**（`src/train.py`）：focal loss + capped per-label pos_weight + label smoothing，
+权重 EMA，动态上下文增强（(0,30] 变长），4 卡 DDP。
+
+**集成推理**（`src/infer_ensemble.py`）：训练时按 valid `best_f1` 保留 top-5 成员
+（每个成员自带各标签最优阈值，写入 `ensemble_manifest.json`）；推理时逐成员用自己的阈值二值化，
+再做**逐标签多数投票**得到最终 0/1。
 
 ---
 
-## 安装说明
+## 环境要求
 
-### 1. Conda 环境
-
-```bash
-conda create -n finvcup python=3.10 -y
-conda activate finvcup
-```
-
-### 2. 安装 PyTorch（按你机器的 CUDA 版本选择）
-
-请参考 [PyTorch 官网](https://pytorch.org/get-started/locally/) 安装带 CUDA 的 `torch` / `torchaudio`，例如：
+- Linux + NVIDIA GPU，CUDA 12.4（推理镜像基于 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`）
+- Python 3.10，PyTorch 2.5.1 / torchaudio 2.5.1 / **transformers 4.57.x**（见「特殊注意事项」）
 
 ```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-```
-
-### 3. 安装其余依赖
-
-```bash
-cd /path/to/finvcup_11th_baseline
+conda create -n finvcup python=3.10 -y && conda activate finvcup
+pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
-`requirements.txt` 含：`numpy`、`scipy`、`scikit-learn`、`pyyaml`、`tqdm`、`transformers<5`；具体 `torch`/`torchaudio`根据实际情况进行安装，避免与本地 CUDA 冲突。
-
-### 4. 缓存与镜像（推荐）
-
-根据实际情况酌情修改模型下载地址，可用镜像加速下载：
-
-```bash
-export HF_HOME=/path/to/.cache/huggingface
-export TRANSFORMERS_CACHE=/path/to/.cache/huggingface
-export TORCH_HOME=/path/to/.cache/torch
-export HF_ENDPOINT=https://hf-mirror.com
-```
-
-### 5. 运行时代码路径
-修改yaml配置文件中的路径为真实训练数据路径，在项目根目录执行，保证 `python -m src.train` 可解析包 `src`：
-
-```bash
-cd /path/to/finvcup_11th_baseline
-```
+预训练骨干（建议提前下到本地，离线加载）：`openai/whisper-large-v3`、`Qwen/Qwen3-0.6B`。
+把它们的本地路径填到配置的 `audio_encoder.model_name` / `text_encoder.model_name`。
 
 ---
 
 ## 数据准备
 
-### 训练集（整通对话）
+**训练集**（整通对话，路径见配置 `paths.train_*`）：
 
 | 路径 | 说明 |
 |------|------|
 | `train/audio/<conv_id>.wav` | 双声道整段音频 |
-| `train/text/<conv_id>.json` | 对应 ASR |
-| `train/labels/<conv_id>.npy` | 逐 chunk 标签，`0~4` 表示 `C/T/BC/I/NA` |
+| `train/text/<conv_id>.json` | ASR 转写 |
+| `train/labels/<conv_id>.npy` | 逐 chunk 标签，`0~4` = `C/T/BC/I/NA` |
 
-### 测试集（30s 切片）
+**测试集 / 复赛私有集**（推理时以只读挂载到 `/xydata`）：
 
-测试数据根目录在 **推理时通过参数显式传入**（即 `--test_root /path/to/test_data`）。常见子目录：
-
-| 路径 | 说明 |
-|------|------|
-| `test/audio/<segment_id>.wav` | 30s 切片 |
-| `test/text/<segment_id>.json` | ASR |
-| `test/context/<segment_id>.npy` | 上下文标签序列 |
----
-
-## 配置说明（YAML）
-
-根据具体情况自行修改以下字段：
-
-- `chunk_ms`、`context_chunks`、`target_chunks`、`stride`、`sample_rate`：时间窗与采样。
-- `paths.*`：数据目录、`output_root`、`checkpoints_dir`、`logs_dir`、`cache_root`。（本 baseline 不在 config 中保存 `test_root`）
-- `labels`：`C/T/BC/I/NA` 的 id、`positive_ids`（二分类正类）、`multi_targets`（多标签头输出顺序）。
-- `split.valid_ratio`、`split.by_conversation`：验证比例与是否按会话划分。
-- `audio_encoder.type`：`cnn` 或 `whisper`（Whisper 时需 `model_name`、`proj_dim`、`freeze` 等）。
-- `text_encoder.model_name`、`max_length`、`freeze_backbone`。
-- `train`：`multi_label`、`epochs`、`batch_size`、`save_metric`（如 `roc_auc`）、`early_stop_patience`、`--resume` 等。
-- `env`: 具体缓存路径，可选
-示例：
-
-- baseline 配置：`configs/whisper_qwen0_6b_constrained_event_formal_5labels_competition.yaml`
+```
+/xydata
+├── audio/<segment_id>.wav     # 上下文音频（复赛为 (0,30] 变长）
+├── text/<segment_id>.json     # ASR
+└── context/<segment_id>.npy   # 上下文标签序列
+```
 
 ---
 
-## 训练
-
-
-## Baseline
-
-### 1. 训练（train/valid）
+## 1）训练 —— `train.sh`
 
 ```bash
-bash scripts/run_train.sh configs/whisper_qwen0_6b_constrained_event_formal_5labels_competition.yaml 4
+bash train.sh                      # 默认：tuned 集成配置 + 4 卡 DDP
+bash train.sh <config> <num_gpus>  # 自定义配置与卡数
+NUM_GPUS=2 bash train.sh           # 也可用环境变量
 ```
-根据具体环境，GPU数量，修改脚本参数，训练结束后在 `paths.checkpoints_dir` 下得到 `best.pt`（由 `train.save_metric` 选择）。
 
-### 2. 测试集推理（仅输出 pred.csv）
+- 默认配置：`configs/whisper_qwen0_6b_lmf_ensemble_4xL20_tuned.yaml`
+- 产物：`<checkpoints_dir>/` 下的 top-5 成员 `ensemble_ep*.pt` 与 best，
+  以及 `<logs_dir>/ensemble_manifest.json`（含各成员各标签最优阈值）。
+- **运行前**请把配置里的 `paths.train_*` 与两个 `model_name` 改成你机器上的真实路径。
+
+## 2）推理 —— `run.sh`（程序入口）
+
+`run.sh` 是评测/审核的统一入口：读 `/xydata` 测试集 → 集成推理 → 把结果写到
+**`/app/submit/submit.csv`**。
 
 ```bash
-bash scripts/run_infer.sh /path/to/best.pt /path/to/pred_test1.csv /path/to/test configs/whisper_qwen0_6b_constrained_event_formal_5labels_competition.yaml
+# 容器内（工作目录 /app）直接执行：
+bash run.sh
 ```
 
-`pred_test1.csv` 列：`segment_id` + `labels.multi_targets`（小写）对应的 0/1 预测列。格式参考repo中 pred_test1.csv即可
-
-/path/to/best.pt指训练好的模型checkpoint，/path/to/pred_test1.csv指测试集结果输出路径，/path/to/test指测试集数据路径
-
-
-## TensorBoard
+等价命令（`run.sh` 内部即执行）：
 
 ```bash
-tensorboard --logdir /path/to/outputs/logs/tb --host 0.0.0.0 --port 6006
+python3 -m src.infer_ensemble \
+  --config configs/docker_infer_ensemble.yaml \
+  --test_root /xydata \
+  --output_csv /app/submit/submit.csv
 ```
 
-多标签训练时，常见标量包括：`valid/macro_f1`、`valid/{label}_f1` 等。
+可选环境变量：`TEST_ROOT`、`OUT_CSV`、`CONFIG_PATH`、`TOPK`（只用前 K 个成员）、
+`BATCH_SIZE`（显存不足调小）、`MAX_SEGMENTS`（冒烟测试）。
+
+**输出格式**（英文逗号分隔，含表头）：
+
+```
+segment_id,c,na,i,bc,t
+0000,1,1,0,0,1
+...
+```
+
+## 3）Docker 镜像（复赛提交）
+
+详见 [DOCKER_SUBMIT.md](DOCKER_SUBMIT.md)。在训练服务器上一键构建：
+
+```bash
+bash scripts/build_submit_image.sh        # 暂存模型/checkpoint/manifest → docker build
+```
+
+本地自测（确认能产出 submit.csv）：
+
+```bash
+docker run --rm -it --gpus all \
+  -v $(pwd)/test_data:/xydata:ro \
+  -v $(pwd)/_submit_out:/app/submit \
+  finvcup-infer:latest bash -lc 'bash run.sh && head /app/submit/submit.csv'
+```
 
 ---
+
+## ⚠️ 特殊注意事项（运行不成功通常出在这几条）
+
+1. **模型结构字段必须与训练 checkpoint 一致**：成员 checkpoint 为「瘦身」格式（只存可训练参数），
+   以 `strict=False` 叠加到预训练骨干上。若 `configs/docker_infer_ensemble.yaml` 的
+   `audio_encoder / text_encoder / context_encoder / fusion / labels` 与训练那份不一致，
+   会静默错配、跑分异常。本仓库的 docker 配置已对齐 `..._4xL20_tuned.yaml`。
+2. **transformers 版本**：`WhisperAudioEncoder._forward_encoder_split` 镜像了 transformers
+   **4.57.x** 的 WhisperEncoder 内部实现（`unfreeze_layers>0` 时推理会走这条分支）。
+   `scripts/build_submit_image.sh` 会自动探测当前环境的 transformers 版本注入镜像——
+   请在**训练用的同一个 conda 环境**里执行构建。
+3. **离线加载**：评测 GPU 不联网。骨干权重已拷进镜像 `/app/models/`，并设
+   `HF_HUB_OFFLINE=1 / TRANSFORMERS_OFFLINE=1`，推理不会联网下载。
+4. **换行符**：`*.sh` 必须为 LF（已用 `.gitattributes` 固定），否则容器内 `bash run.sh` 会因 `\r` 报错。
+5. **资源约束**：镜像 ≤ 20GB、模型参数 ≤ 8B（单成员 ≈1.2B，推理一次只载一个成员）、
+   推理 ≤ 60 分钟（超时调小 `BATCH_SIZE` 或 `TOPK`）。
 
 ## 仓库结构
 
 ```text
-configs/          # 实验配置
-scripts/          # run_train.sh, run_infer.sh
+train.sh                       # 训练入口
+run.sh                         # 推理入口 → /app/submit/submit.csv
+Dockerfile.infer               # 推理镜像
+DOCKER_SUBMIT.md               # 镜像构建/提交手册
+configs/                       # 训练配置 + docker_infer_ensemble.yaml
+scripts/build_submit_image.sh  # 一键构建提交镜像
 src/
-  data/dataset.py
+  data/dataset.py              # 训练/测试 Dataset + collate
   models/multimodal_baseline.py
-  train.py        # 训练
-  eval.py         # 离线评估
-  infer_test.py   # 测试集推理：仅导出 pred.csv
-  utils.py        # 指标、配置、分布式工具
-train/            # 训练数据（需自行下载解压）
-test/       # 测试数据（需自行下载解压）
-pred_test1.csv     # 参考提交结果格式
+  train.py                     # 训练（DDP + EMA + 集成成员保存）
+  infer_ensemble.py            # 集成推理（多数投票）→ submit.csv
+  infer_test.py                # 单模型推理
+  utils.py
+test_data/                     # 10 条样例，仅本地自测（不进镜像）
 ```

@@ -1,0 +1,30 @@
+# 只把推理需要的东西放进构建上下文。
+.git
+.gitignore
+.idea
+.cursor
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# 大数据与训练产物（推理镜像不需要）
+train/
+test/
+test_data*/
+outputs/
+*.pt
+*.pth
+*.bin
+*.npy
+*.npz
+pred_*.csv
+
+# 文档
+*.md
+!README.md
+
+# 训练脚本（推理镜像不需要）
+scripts/run_train*.sh
+
+# 注意：docker_assets/（模型权重 + 成员 checkpoint + manifest）是镜像必需内容，
+# 由 scripts/build_submit_image.sh 暂存，这里【不要】忽略它。

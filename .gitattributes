@@ -1,0 +1,5 @@
+# 强制 shell 脚本 / Dockerfile 用 LF 换行，避免在 Linux 容器里因 CRLF(\r) 执行失败。
+*.sh text eol=lf
+run.sh text eol=lf
+Dockerfile* text eol=lf
+*.yaml text eol=lf

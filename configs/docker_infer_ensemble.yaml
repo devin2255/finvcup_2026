@@ -1,0 +1,115 @@
+# ============================================================
+# 复赛 Docker 推理专用配置（容器内路径 /app）。
+#
+# ⚠️ 结构字段（chunk/context、audio_encoder、text_encoder、
+#    context_encoder、fusion、labels）必须与训练出 checkpoint 的那份
+#    配置【完全一致】，否则成员 checkpoint 以 strict=False 加载时会静默
+#    错配，跑分会变成乱码。本文件复制自：
+#    configs/whisper_qwen0_6b_lmf_ensemble_4xL20_tuned.yaml
+#    若你提交的是别的 run 的 checkpoint，请同步对应 run 的结构字段。
+# ============================================================
+
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 4
+
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125
+  max_context_chunks: 375
+  context_prob: 0.5
+
+paths:
+  project_root: /app
+  train_audio_dir: /app/train/audio
+  train_text_dir: /app/train/text
+  train_labels_dir: /app/train/labels
+
+  output_root: /app/outputs
+  checkpoints_dir: /app/checkpoints          # ensemble 成员 .pt 所在目录
+  logs_dir: /app/logs                        # ensemble_manifest.json 所在目录
+
+  cache_root: /app/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]           # → 输出列: segment_id,c,na,i,bc,t
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: /app/models/whisper-large-v3   # 镜像内本地路径（离线加载）
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2
+  tail_ratio: 0.25
+
+text_encoder:
+  model_name: /app/models/Qwen3-0.6B         # 镜像内本地路径（离线加载）
+  max_length: 256
+  freeze_backbone: true
+
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 40
+  max_steps_per_epoch: 500
+  eval_valid_sample_count: 30000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  batch_size: 128
+  eval_batch_size: 64                        # 推理批大小；可用 BATCH_SIZE 环境变量覆盖
+  log_every_steps: 40
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.2e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.03
+  ema_decay: 0.999
+  grad_clip_norm: 1.0
+  use_amp: true
+  use_ema: true
+
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_ensemble.pt
+  early_stop_patience: 15
+
+  ensemble_topk: 5
+
+env:
+  HF_HOME: /app/.cache/huggingface
+  TRANSFORMERS_CACHE: /app/.cache/huggingface
+  TORCH_HOME: /app/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TOKENIZERS_PARALLELISM: "false"

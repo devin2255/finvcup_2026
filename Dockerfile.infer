@@ -1,0 +1,37 @@
+# ============================================================
+# 复赛集成推理镜像。基础环境对齐官方 baseline（CUDA 12.4 / torch 2.5.1）。
+# 构建前需先用 scripts/build_submit_image.sh 把模型权重、ensemble 成员
+# checkpoint、manifest 暂存到 docker_assets/ 下（见该脚本）。
+# ============================================================
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+# 训练时使用的 transformers 版本（默认 4.57.1，构建脚本会自动探测覆盖）。
+# WhisperAudioEncoder._forward_encoder_split 镜像了该版本的内部实现，版本不符可能报错或错配。
+ARG TRANSFORMERS_VERSION=4.57.1
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=false
+
+# ---- 依赖（与业务代码、模型分层，改代码不会触发重装）----
+COPY requirements.docker.txt ./
+RUN pip install --no-cache-dir -r requirements.docker.txt \
+ && pip install --no-cache-dir "transformers==${TRANSFORMERS_VERSION}" pynvml
+
+# ---- 模型骨干（最大、最稳定的层，放前面利于缓存）----
+COPY docker_assets/models/ /app/models/
+
+# ---- ensemble 成员 checkpoint + manifest ----
+COPY docker_assets/checkpoints/ /app/checkpoints/
+COPY docker_assets/logs/ /app/logs/
+
+# ---- 业务代码与推理配置 ----
+COPY src/ ./src/
+COPY configs/docker_infer_ensemble.yaml ./configs/docker_infer_ensemble.yaml
+COPY run.sh ./run.sh
+RUN chmod +x /app/run.sh && mkdir -p /xydata /app/submit
+
+VOLUME ["/xydata", "/app/submit"]
