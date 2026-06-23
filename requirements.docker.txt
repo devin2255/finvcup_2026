@@ -1,8 +1,11 @@
-# 复赛推理镜像依赖（基础镜像 pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
-# 已自带 torch 2.5.1+cu124，这里【不要】再装 torch，以免覆盖 CUDA 版本）。
-# transformers 与 pynvml 由 Dockerfile 单独安装（版本通过 build-arg 注入）。
-numpy
-scikit-learn
-pyyaml
-tqdm
-torchaudio==2.5.1
+# 复赛推理镜像依赖，版本【钉死到训练机】（pip list）以保证行为一致。
+# torch / torchaudio / transformers 由 Dockerfile 单独安装（torch 随基础镜像；
+# torchaudio 走 cu128 索引；transformers 由 build-arg 注入），这里不要重复列。
+numpy==2.4.4
+scipy==1.17.1
+scikit-learn==1.9.0
+pyyaml==6.0.3
+tqdm==4.68.3
+safetensors==0.8.0
+huggingface_hub==0.36.2
+tokenizers==0.22.2

@@ -87,7 +87,8 @@ def main():
     )
 
     model = MultimodalTurnTakingModel(cfg).to(device)
-    ckpt = torch.load(args.checkpoint, map_location="cpu")
+    # weights_only=False：可信 checkpoint，含非张量对象；torch>=2.6 默认会拒绝加载。
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     per_label_thresholds = _resolve_thresholds(args.threshold_file, ckpt)
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval()

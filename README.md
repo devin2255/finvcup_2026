@@ -28,12 +28,12 @@
 
 ## 环境要求
 
-- Linux + NVIDIA GPU，CUDA 12.4（推理镜像基于 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`）
-- Python 3.10，PyTorch 2.5.1 / torchaudio 2.5.1 / **transformers 4.57.x**（见「特殊注意事项」）
+- Linux + NVIDIA GPU，CUDA 12.8（推理镜像基于 `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime`，PDF 允许 12.4–12.8）
+- **PyTorch 2.11.0+cu128 / torchaudio 2.11.0+cu128 / transformers 4.57.1 / numpy 2.4.4**（与训练机一致，见「特殊注意事项」）
 
 ```bash
-conda create -n finvcup python=3.10 -y && conda activate finvcup
-pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
+conda create -n finvcup python=3.11 -y && conda activate finvcup
+pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
 

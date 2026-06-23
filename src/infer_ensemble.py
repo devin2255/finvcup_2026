@@ -171,7 +171,9 @@ def main():
     seg_order: list[str] = []  # 保持首次出现顺序（loader 确定性，各成员一致）
 
     for mi, member in enumerate(members):
-        ckpt = torch.load(member["path"], map_location="cpu")
+        # weights_only=False：checkpoint 由本项目训练产出（可信），且含 config/thresholds
+        # 等非张量对象；torch>=2.6 默认 weights_only=True 会拒绝加载，这里显式关闭。
+        ckpt = torch.load(member["path"], map_location="cpu", weights_only=False)
         thr_map = _member_thresholds(member, ckpt, label_cols, args.default_threshold)
         thr_vec = np.array([thr_map[name] for name in label_cols], dtype=np.float32)
 

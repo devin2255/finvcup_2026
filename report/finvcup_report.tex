@@ -136,7 +136,7 @@ weight decay 0.03、梯度裁剪 1.0、AMP 混合精度。引入\textbf{权重 E
 \item \textbf{训练}：\texttt{bash train.sh}（4 卡 DDP，产出 Top-5 成员与 manifest）。
 \item \textbf{推理}：\texttt{bash run.sh}（入口），读 \texttt{/xydata} $\rightarrow$ 集成投票 $\rightarrow$
 写 \texttt{/app/submit/submit.csv}（列：\texttt{segment\_id,c,na,i,bc,t}）。
-\item \textbf{环境}：\texttt{pytorch/pytorch:2.5.1-cuda12.4}，transformers 4.57.x，骨干权重离线本地加载。
+\item \textbf{环境}：\texttt{pytorch/pytorch:2.11.0-cuda12.8}，transformers 4.57.1，骨干权重离线本地加载。
 \end{itemize}
 单成员参数量约 1.2B（Whisper encoder + Qwen3-0.6B + 轻量融合头），推理一次仅载入一个成员，
 满足参数量与显存约束。

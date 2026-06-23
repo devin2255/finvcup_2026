@@ -27,7 +27,10 @@ MANIFEST="${MANIFEST:-${RUN_DIR}/logs/ensemble_manifest.json}"
 WHISPER_DIR="${WHISPER_DIR:-/mnt/workspace/dorihue/modelscope/whisper-large-v3}"
 QWEN_DIR="${QWEN_DIR:-/mnt/workspace/dorihue/modelscope/Qwen3-0.6B}"
 IMAGE_TAG="${IMAGE_TAG:-finvcup-infer:latest}"
+BASE_IMAGE="${BASE_IMAGE:-pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime}"
+# 自动探测当前（训练）环境的版本注入镜像，确保镜像与训练机一致
 TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-$(python3 -c 'import transformers;print(transformers.__version__)' 2>/dev/null || echo 4.57.1)}"
+TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-$(python3 -c 'import torchaudio;print(torchaudio.__version__)' 2>/dev/null || echo 2.11.0+cu128)}"
 
 echo "==> 源路径"
 echo "    MANIFEST    = ${MANIFEST}"
@@ -35,7 +38,8 @@ echo "    CKPT_DIR    = ${CKPT_DIR}"
 echo "    WHISPER_DIR = ${WHISPER_DIR}"
 echo "    QWEN_DIR    = ${QWEN_DIR}"
 echo "    IMAGE_TAG   = ${IMAGE_TAG}"
-echo "    transformers== ${TRANSFORMERS_VERSION}"
+echo "    BASE_IMAGE  = ${BASE_IMAGE}"
+echo "    transformers== ${TRANSFORMERS_VERSION}   torchaudio== ${TORCHAUDIO_VERSION}"
 
 # ---- 校验源文件存在 ----
 for p in "${MANIFEST}" "${CKPT_DIR}" "${WHISPER_DIR}" "${QWEN_DIR}"; do
@@ -80,7 +84,9 @@ du -sh "${ASSETS}"/* 2>/dev/null || true
 echo "==> docker build"
 docker build \
   -f Dockerfile.infer \
+  --build-arg BASE_IMAGE="${BASE_IMAGE}" \
   --build-arg TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION}" \
+  --build-arg TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION}" \
   -t "${IMAGE_TAG}" \
   .
 

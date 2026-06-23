@@ -1,13 +1,20 @@
 # ============================================================
-# 复赛集成推理镜像。基础环境对齐官方 baseline（CUDA 12.4 / torch 2.5.1）。
+# 复赛集成推理镜像。环境【对齐训练机】：
+#   torch 2.11.0+cu128 / CUDA 12.8 / transformers 4.57.1 / numpy 2.4.4
+# （PDF 允许 CUDA 12.4–12.8，cu128 合规；与训练同版本可避免 checkpoint 跨版本加载问题）
+#
 # 构建前需先用 scripts/build_submit_image.sh 把模型权重、ensemble 成员
-# checkpoint、manifest 暂存到 docker_assets/ 下（见该脚本）。
+# checkpoint、manifest 暂存到 docker_assets/ 下。
+#
+# 若 runtime 基础镜像拉取失败，可改用 devel：
+#   --build-arg BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel
 # ============================================================
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
+FROM ${BASE_IMAGE}
 
-# 训练时使用的 transformers 版本（默认 4.57.1，构建脚本会自动探测覆盖）。
-# WhisperAudioEncoder._forward_encoder_split 镜像了该版本的内部实现，版本不符可能报错或错配。
+# 与训练机一致的版本（构建脚本会自动探测当前环境并注入覆盖默认值）
 ARG TRANSFORMERS_VERSION=4.57.1
+ARG TORCHAUDIO_VERSION=2.11.0+cu128
 
 WORKDIR /app
 
@@ -16,7 +23,11 @@ ENV PYTHONUNBUFFERED=1 \
     TRANSFORMERS_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false
 
-# ---- 依赖（与业务代码、模型分层，改代码不会触发重装）----
+# torchaudio 对齐训练版本（base 镜像若已自带同版本则为 no-op）
+RUN pip install --no-cache-dir "torchaudio==${TORCHAUDIO_VERSION}" \
+      --extra-index-url https://download.pytorch.org/whl/cu128
+
+# 其余推理依赖（版本钉死到训练机 pip list）
 COPY requirements.docker.txt ./
 RUN pip install --no-cache-dir -r requirements.docker.txt \
  && pip install --no-cache-dir "transformers==${TRANSFORMERS_VERSION}" pynvml
