@@ -1,0 +1,37 @@
+# 只把提交镜像需要的内容送进构建上下文，控制体积/加速构建
+
+# 大目录
+train/
+test/
+test_data/
+outputs/
+.cache/
+.git/
+.github/
+.idea/
+
+# VAP 工具（阶段一推理不需要；零填充方案不打包 MaAI/CPC）
+MaAI/
+
+# Python 缓存与虚拟环境
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.env/
+
+# 文档/数据说明（镜像内只保留 SUBMIT_README.md -> README.md）
+README.md
+赛题介绍.md
+结果评估说明.txt
+*.ipynb
+
+# 备用脚本（提交镜像只用 run.sh / train.sh）
+scripts/run_train*.sh
+scripts/run_infer*.sh
+scripts/stage_submission.ps1
+
+# 其它实验 config（镜像只用 submit_single_vapfeat.yaml）
+configs/whisper_qwen0_6b_lmf_*.yaml

@@ -1,0 +1,131 @@
+# ============================================================
+# 复赛提交专用配置（单模型 / 零填充 VAP）
+#
+# 与 whisper_qwen0_6b_lmf_vapfeat.yaml 的差异：
+#   1) 所有路径改为容器内 /app 与只读测试集 /xydata；
+#   2) env 全离线（HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE），不连任何网络；
+#   3) vap_feat.enabled 仍为 true：模型需建出 vap_feat_proj/merge 层以匹配
+#      ensemble_ep6.pt 的权重；推理时测试集不产 vap_feat，模型自动喂零向量
+#      （见 src/models/multimodal_baseline.py 的 forward）。
+#
+# 模型参数量：whisper-large-v3 (1.54B) + Qwen3-0.6B (0.6B) = 2.14B < 8B ✓
+# ============================================================
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8
+
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125
+  max_context_chunks: 375
+  context_prob: 0.5
+
+paths:
+  project_root: /app
+  # 训练数据路径（仅复赛阶段二复现训练时使用；阶段一推理不读取）。
+  # 审核方运行 train.sh 时，把整通对话训练集挂到此处即可。
+  train_audio_dir: /app/data/train/audio
+  train_text_dir: /app/data/train/text
+  train_labels_dir: /app/data/train/labels
+
+  output_root: /app/outputs/submit
+  checkpoints_dir: /app/outputs/submit/checkpoints
+  logs_dir: /app/outputs/submit/logs
+
+  cache_root: /app/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  # 输出列顺序（小写后）= c,na,i,bc,t，与官方 submit.csv header 完全一致。
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: /app/models/whisper-large-v3
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2
+  tail_ratio: 0.25
+
+text_encoder:
+  model_name: /app/models/Qwen3-0.6B
+  max_length: 256
+  freeze_backbone: true
+
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 40
+  max_steps_per_epoch: 500
+  eval_valid_sample_count: 30000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  batch_size: 128
+  eval_batch_size: 256
+  log_every_steps: 40
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.2e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.03
+  ema_decay: 0.999
+  grad_clip_norm: 1.0
+  use_amp: true
+  use_ema: true
+
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_vapfeat.pt
+  early_stop_patience: 15
+
+  ensemble_topk: 5
+
+# 辅助头关闭（本方案用"特征注入"，推理喂零向量）
+vap_aux:
+  enabled: false
+
+# VAP 特征第5模态：保持 enabled 以建出与 checkpoint 对齐的层。
+# cache_dir 仅复赛阶段二预计算训练特征时使用；阶段一推理不读取（测试集喂零）。
+vap_feat:
+  enabled: true
+  feat_dim: 18
+  frame_rate: 10
+  cache_dir: /app/.cache/vap_ch_kyoto
+
+env:
+  HF_HOME: /app/.cache/huggingface
+  TRANSFORMERS_CACHE: /app/.cache/huggingface
+  TORCH_HOME: /app/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TOKENIZERS_PARALLELISM: "false"

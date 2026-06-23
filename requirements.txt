@@ -5,5 +5,6 @@ pyyaml
 tqdm
 torch
 torchaudio
-transformers<5
+transformers>=4.51,<5
 tensorboard
+pynvml
