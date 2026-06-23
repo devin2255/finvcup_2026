@@ -73,15 +73,66 @@ for mb in members:
 print(f"   共 {len(members)} 个成员")
 PY
 
-echo "==> 拷贝模型权重（较大，请稍候）"
-cp -r "${WHISPER_DIR}" "${ASSETS}/models/whisper-large-v3"
-cp -r "${QWEN_DIR}"    "${ASSETS}/models/Qwen3-0.6B"
+echo "==> 瘦身拷贝模型权重（只拷推理必需文件，优先 safetensors；跳过 *.bin / original/ / fp32 副本）"
+python3 - "${WHISPER_DIR}" "${ASSETS}/models/whisper-large-v3" "${QWEN_DIR}" "${ASSETS}/models/Qwen3-0.6B" <<'PY'
+import glob, os, shutil, sys
+
+# 只拷推理必需：单文件 fp16 权重 model.safetensors + 各种小配置/分词器。
+# 明确跳过：fp32 副本(*.fp32*)、所有 *.bin、flax(*.msgpack)、tf(*.h5)、子目录、modelscope 杂项。
+BIG = 50 * 1024 * 1024
+SKIP_NAMES = {"README.md", "LICENSE", "configuration.json", ".msc", ".mv"}
+
+def want_small(name):
+    if name in SKIP_NAMES:
+        return False
+    if "fp32" in name:                                   # fp32 的 index 等
+        return False
+    low = name.lower()
+    if low.endswith((".bin", ".msgpack", ".h5", ".safetensors", ".pt", ".onnx")):
+        return False                                     # 权重单独处理，其余大格式不要
+    return True
+
+def stage(src, dst):
+    os.makedirs(dst, exist_ok=True)
+    # 1) 小配置/分词器文件
+    for name in sorted(os.listdir(src)):
+        p = os.path.join(src, name)
+        if os.path.isfile(p) and os.path.getsize(p) < BIG and want_small(name):
+            shutil.copy2(p, os.path.join(dst, name))
+    # 2) 权重：优先单文件 model.safetensors；其次标准分片；最后非 fp32 的 pytorch_model.bin
+    if os.path.isfile(os.path.join(src, "model.safetensors")):
+        shutil.copy2(os.path.join(src, "model.safetensors"), os.path.join(dst, "model.safetensors"))
+    elif os.path.isfile(os.path.join(src, "model.safetensors.index.json")):
+        shutil.copy2(os.path.join(src, "model.safetensors.index.json"),
+                     os.path.join(dst, "model.safetensors.index.json"))
+        for p in glob.glob(os.path.join(src, "model-*-of-*.safetensors")):
+            shutil.copy2(p, os.path.join(dst, os.path.basename(p)))
+    else:
+        bins = [b for b in sorted(glob.glob(os.path.join(src, "pytorch_model*.bin")))
+                if "fp32" not in os.path.basename(b)]
+        assert bins, f"找不到可用权重(model.safetensors / 标准分片 / pytorch_model.bin): {src}"
+        for b in bins:
+            shutil.copy2(b, os.path.join(dst, os.path.basename(b)))
+        idx = os.path.join(src, "pytorch_model.bin.index.json")
+        if os.path.isfile(idx):
+            shutil.copy2(idx, os.path.join(dst, "pytorch_model.bin.index.json"))
+    total = sum(os.path.getsize(os.path.join(dst, f)) for f in os.listdir(dst))
+    print(f"   {os.path.basename(dst):20s} 大小={total/1e9:.2f} GB  文件: {sorted(os.listdir(dst))}")
+
+stage(sys.argv[1], sys.argv[2])
+stage(sys.argv[3], sys.argv[4])
+PY
 
 echo "==> 暂存内容大小"
 du -sh "${ASSETS}"/* 2>/dev/null || true
+ASSET_GB=$(du -s "${ASSETS}" | awk '{printf "%.1f", $1/1024/1024}')
+echo "    docker_assets 合计 ${ASSET_GB} GB（基础镜像另算 ~9GB，目标镜像 ≤20GB）"
 
 # ---- 构建 ----
-echo "==> docker build"
+# DSW 等受限容器里 BuildKit 的 mount 会被内核拒绝（operation not permitted），
+# 关掉 BuildKit 用老构建器即可绕过。
+export DOCKER_BUILDKIT=0
+echo "==> docker build (DOCKER_BUILDKIT=0)"
 docker build \
   -f Dockerfile.infer \
   --build-arg BASE_IMAGE="${BASE_IMAGE}" \
