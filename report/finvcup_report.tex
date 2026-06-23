@@ -1,10 +1,12 @@
+% !TeX program = xelatex
 % ============================================================
 %  第11届信也科技杯 复赛技术报告（≤3 页）
+%  ⚠️ 必须用 XeLaTeX 编译；Overleaf 需在 Menu → Compiler 选 XeLaTeX，
+%     否则会报 “fandol unavailable / Font unihei58 not found”（那是 pdfLaTeX 模式）。
 %  编译方式：XeLaTeX（中文需要 ctex / xeCJK）
 %    xelatex finvcup_report.tex
 %    xelatex finvcup_report.tex   % 跑两次让引用/目录稳定
 %  Overleaf：右上角 Menu → Compiler 选 "XeLaTeX"
-%  红色 [［...］] 为需要你填入的数字/队名，搜索 \todo 即可定位。
 % ============================================================
 \documentclass[10pt,twocolumn,a4paper]{ctexart}
 
@@ -19,8 +21,6 @@
 
 \setlength{\columnsep}{0.7cm}
 \setlength{\parskip}{2pt}
-
-\newcommand{\todo}[1]{\textcolor{red}{[#1]}}
 
 % 紧凑标题
 \usepackage{titlesec}
@@ -44,8 +44,8 @@
 延续(C)、静音(NA)、打断(I)、附和(BC)、话权转移(T) 五类事件。我们构建了
 \textbf{音频/文本/历史标签/手工统计}四路模态的多模态模型，以\textbf{低秩张量融合 + 自适应门控}
 聚合，多标签 sigmoid 输出；训练采用 focal 损失、按类上限的正样本加权、标签平滑与\textbf{权重 EMA}；
-推理阶段对 valid 上最优的 \textbf{Top-5} 模型逐标签用各自最优阈值二值化后做\textbf{多数投票}。
-私域测试集（上下文 (0,30]\,s 动态变长）上取得 Macro-F1 \todo{填分数}。
+推理阶段对 valid 上最优的 \textbf{Top-5} 模型逐标签用各自最优阈值二值化后做\textbf{多数投票}，
+以提升在私域测试集（上下文 (0,30]\,s 动态变长）上的鲁棒性。
 \end{abstract}
 
 % ---------- 全宽流程图 ----------
@@ -129,37 +129,6 @@ weight decay 0.03、梯度裁剪 1.0、AMP 混合精度。引入\textbf{权重 E
 二值化，再做\textbf{逐标签多数投票}：得票 $>$ 半数（5 个成员即 $\ge 3$ 票）判为 1。
 成员 checkpoint 为「瘦身」格式（仅存可训练参数），推理时从本地预训练骨干以 \texttt{strict=False}
 叠加还原，节省体积。
-
-\section{实验结果}
-主指标为五类事件的 \textbf{Macro-F1}。% 请填入你的实际结果
-\begin{table}[h]
-\centering\footnotesize
-\caption{私域测试集结果（占位，待填）}
-\begin{tabular}{lccccc c}
-\toprule
-方法 & C & NA & I & BC & T & Macro-F1 \\
-\midrule
-单模型(best) & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
-\textbf{Top-5 集成} & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} & \textbf{\todo{}} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\noindent\textbf{消融（占位，待填）}：
-\begin{table}[h]
-\centering\footnotesize
-\begin{tabular}{l c}
-\toprule
-配置 & Macro-F1 \\
-\midrule
-完整方案 & \todo{} \\
-\;\; $-$ 权重 EMA & \todo{} \\
-\;\; $-$ 手工特征 & \todo{} \\
-\;\; $-$ 低秩融合(改为拼接) & \todo{} \\
-\;\; 单模型(无集成) & \todo{} \\
-\bottomrule
-\end{tabular}
-\end{table}
 
 \section{复现说明}
 代码结构与运行命令（详见 \texttt{README.md}）：
