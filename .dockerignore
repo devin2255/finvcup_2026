@@ -7,6 +7,14 @@
 **/*.pyc
 **/*.pyo
 
+# Python 虚拟环境 / conda 环境（绝不进镜像；放这里只是让构建上下文更小更快）
+venv/
+.venv/
+env/
+.conda/
+conda_env/
+*.egg-info/
+
 # 大数据与训练产物（推理镜像不需要）
 train/
 test/

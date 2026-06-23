@@ -1,0 +1,175 @@
+% ============================================================
+%  第11届信也科技杯 复赛技术报告（≤3 页）
+%  编译方式：XeLaTeX（中文需要 ctex / xeCJK）
+%    xelatex finvcup_report.tex
+%    xelatex finvcup_report.tex   % 跑两次让引用/目录稳定
+%  Overleaf：右上角 Menu → Compiler 选 "XeLaTeX"
+%  红色 [［...］] 为需要你填入的数字/队名，搜索 \todo 即可定位。
+% ============================================================
+\documentclass[10pt,twocolumn,a4paper]{ctexart}
+
+\usepackage[margin=1.6cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\columnsep}{0.7cm}
+\setlength{\parskip}{2pt}
+
+\newcommand{\todo}[1]{\textcolor{red}{[#1]}}
+
+% 紧凑标题
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{6pt}{2pt}
+\titlespacing*{\subsection}{0pt}{4pt}{1pt}
+\titleformat{\section}{\bfseries\large}{\thesection}{0.5em}{}
+\titleformat{\subsection}{\bfseries\normalsize}{\thesubsection}{0.5em}{}
+
+\title{\vspace{-1.2cm}\textbf{多模态融合与集成投票的对话轮次交互建模}\\
+\large 第11届信也科技杯 · Turn-Taking 复赛技术报告}
+\author{队名：没想好\quad 日期：\today}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-0.8cm}
+
+\begin{abstract}
+\noindent 本方案面向多方言中文对话的轮次交互（Turn-Taking）建模：给定过去 $\le$30\,s 的双声道
+对话（音频、ASR 文本、历史 chunk 标签），预测未来 2\,s（$25\times80$\,ms chunk）内是否出现
+延续(C)、静音(NA)、打断(I)、附和(BC)、话权转移(T) 五类事件。我们构建了
+\textbf{音频/文本/历史标签/手工统计}四路模态的多模态模型，以\textbf{低秩张量融合 + 自适应门控}
+聚合，多标签 sigmoid 输出；训练采用 focal 损失、按类上限的正样本加权、标签平滑与\textbf{权重 EMA}；
+推理阶段对 valid 上最优的 \textbf{Top-5} 模型逐标签用各自最优阈值二值化后做\textbf{多数投票}。
+私域测试集（上下文 (0,30]\,s 动态变长）上取得 Macro-F1 \todo{填分数}。
+\end{abstract}
+
+% ---------- 全宽流程图 ----------
+\begin{figure*}[t]
+\centering
+\footnotesize
+\begin{tikzpicture}[
+  node distance=6mm,
+  box/.style={draw,rounded corners,align=center,inner sep=3pt,minimum height=8mm,font=\footnotesize},
+  >={Stealth[length=2mm]}]
+\node[box,fill=blue!6] (raw) {双声道音频\\ASR 文本\\逐 chunk 标签};
+\node[box,fill=blue!6,right=of raw] (slice) {样本切分\\30s 上下文\\+2s 预测窗口\\(动态上下文增强)};
+\node[box,fill=green!8,right=of slice] (enc) {四路编码\\Whisper / Qwen3\\标签 CNN / 手工特征};
+\node[box,fill=orange!10,right=of enc] (fuse) {低秩张量融合\\+ 自适应门控};
+\node[box,fill=orange!10,right=of fuse] (head) {5 路 sigmoid 头\\(多标签)};
+\node[box,fill=red!8,right=of head] (ens) {Top-5 成员\\各自阈值二值化\\逐标签多数投票};
+\node[box,fill=gray!12,right=of ens] (out) {submit.csv\\segment\_id,\\c,na,i,bc,t};
+\draw[->] (raw)--(slice); \draw[->] (slice)--(enc); \draw[->] (enc)--(fuse);
+\draw[->] (fuse)--(head); \draw[->] (head)--(ens); \draw[->] (ens)--(out);
+\end{tikzpicture}
+\caption{从原始数据到最终结果的整体流程：数据切分 $\rightarrow$ 多模态编码 $\rightarrow$ 融合 $\rightarrow$ 多标签预测 $\rightarrow$ 集成投票 $\rightarrow$ 输出。}
+\label{fig:pipeline}
+\end{figure*}
+
+\section{任务与整体流程}
+轮次交互的核心是判断 AI「何时开口、何时收声」。我们将其建模为\textbf{事件级多标签二分类}：
+对未来 2\,s 窗口内 5 类标签 $\{C,NA,I,BC,T\}$ 分别预测「是否出现」。整体流程见图~\ref{fig:pipeline}，
+满足\textbf{因果约束}——仅使用上下文，不读取未来音频或未来标签。
+
+\section{数据构造}
+训练数据为整通双声道对话。以 80\,ms 为一个 chunk，沿对话以步长 \texttt{stride} 滑窗切样本：
+取结束位置前 \texttt{context\_chunks}$=375$（30\,s）作为上下文，其后 \texttt{target\_chunks}$=25$（2\,s）
+作为预测窗口；标签向量 $y_k=\mathbb{1}[\exists\, \text{未来窗口内出现第 }k\text{ 类}]$。
+为贴合私域测试集上下文 $(0,30]$\,s 的\textbf{动态变长}特性，训练时以概率
+\texttt{context\_prob} 随机将上下文长度采样到 $[125,375]$ chunk，不足处以 NA(=4) 左侧补齐；
+测试时同样把变长上下文归一化到定长 375（截取末段、不足补 NA），保证 batch 内长度统一。
+
+\section{多模态模型}
+\subsection{音频编码器}
+采用 \textbf{Whisper-large-v3} 的 encoder：整体冻结、仅解冻\textbf{最后 2 层}做任务自适应。
+为省显存，冻结前缀在 \texttt{no\_grad} 下前向、仅尾部可训练层建图。在时间轴上只对\textbf{尾部}
+（\texttt{tail\_ratio}=0.25）做注意力池化，聚焦临近预测窗口的声学线索，再投影到 512 维。
+
+\subsection{文本编码器}
+ASR 文本按说话人加 \texttt{[SPK1]/[SPK2]} 标记拼接，送入冻结的 \textbf{Qwen3-0.6B}；
+对序列尾部做带 mask 的注意力池化（近因 utterance 更重要）。tokenizer 采用\textbf{左侧截断/左侧补齐}，
+保留最近上下文。
+
+\subsection{历史标签编码与手工特征}
+历史 chunk 标签经 Embedding 后走\textbf{双分支 CNN}：尾部分支（最近 \texttt{tail\_k}=75 chunk）
+做细粒度卷积+展平，全局分支做卷积+注意力池化，拼接得到标签时序表征。
+同时计算\textbf{手工统计特征}：近 25/50/100 窗口的标签分布、到最近事件/话权转移的距离、
+标签转移概率、指数/线性时间衰减分布、均值方差变化率、话轮间隔等，投影为 64 维，
+为模型注入强先验。
+
+\subsection{低秩张量融合与自适应门控}
+四路模态 $\{a,t,c,h\}$ 先做\textbf{低秩张量融合}（rank=64）以紧凑地建模高阶交互：
+\[
+\textstyle z_{\text{int}}=\Big(\sum_{r=1}^{R}\bigodot_{m}\,\tilde{x}_m W_m^{(r)}\Big)\odot w_f + b,
+\]
+其中 $\tilde{x}_m=[1;x_m]$。再对每路做投影并由\textbf{门控网络}输出 4 个 $[0,1]$ 权重，
+按门控加权后与 $z_{\text{int}}$ 拼接、投影到 320 维融合表征，使模型可按样本自适应地决定信任哪个模态。
+
+\subsection{预测头与损失}
+融合表征经线性头输出 5 维 logits，sigmoid 后与标签做 BCE。针对类别不均衡，
+采用 \textbf{focal} 调制（$\gamma=2$）+ \textbf{按类上限正样本加权}（cap=8）+ 标签平滑（0.05）：
+\[
+\mathcal{L}=\frac{1}{K}\sum_{k}\, \alpha_k(1-p_{t,k})^{\gamma}\,\mathrm{BCE}(p_k,\tilde{y}_k).
+\]
+
+\section{训练策略}
+4$\times$L20 四卡 DDP，等效批 512；峰值 lr $1.2\!\times\!10^{-4}$、warmup 0.03、cosine 衰减、
+weight decay 0.03、梯度裁剪 1.0、AMP 混合精度。引入\textbf{权重 EMA}（decay 0.999）：
+评估与保存集成成员时使用 EMA 权重，有效闭合大批量带来的泛化间隙。
+按 valid \texttt{best\_f1} 选优并早停（patience 15）。
+
+\section{集成与阈值}
+训练过程中按 valid \texttt{best\_f1} 排名保留 \textbf{Top-5} 成员；每个成员在 valid 上
+\textbf{逐标签}搜索使 F1 最大的阈值，连同成员清单写入 \texttt{ensemble\_manifest.json}。
+推理时\textbf{逐成员}（同一时刻 GPU 上仅驻留一个模型，显存峰值=单模型）用各自最优阈值把每个标签
+二值化，再做\textbf{逐标签多数投票}：得票 $>$ 半数（5 个成员即 $\ge 3$ 票）判为 1。
+成员 checkpoint 为「瘦身」格式（仅存可训练参数），推理时从本地预训练骨干以 \texttt{strict=False}
+叠加还原，节省体积。
+
+\section{实验结果}
+主指标为五类事件的 \textbf{Macro-F1}。% 请填入你的实际结果
+\begin{table}[h]
+\centering\footnotesize
+\caption{私域测试集结果（占位，待填）}
+\begin{tabular}{lccccc c}
+\toprule
+方法 & C & NA & I & BC & T & Macro-F1 \\
+\midrule
+单模型(best) & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} \\
+\textbf{Top-5 集成} & \todo{} & \todo{} & \todo{} & \todo{} & \todo{} & \textbf{\todo{}} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{消融（占位，待填）}：
+\begin{table}[h]
+\centering\footnotesize
+\begin{tabular}{l c}
+\toprule
+配置 & Macro-F1 \\
+\midrule
+完整方案 & \todo{} \\
+\;\; $-$ 权重 EMA & \todo{} \\
+\;\; $-$ 手工特征 & \todo{} \\
+\;\; $-$ 低秩融合(改为拼接) & \todo{} \\
+\;\; 单模型(无集成) & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{复现说明}
+代码结构与运行命令（详见 \texttt{README.md}）：
+\begin{itemize}\setlength{\itemsep}{0pt}
+\item \textbf{训练}：\texttt{bash train.sh}（4 卡 DDP，产出 Top-5 成员与 manifest）。
+\item \textbf{推理}：\texttt{bash run.sh}（入口），读 \texttt{/xydata} $\rightarrow$ 集成投票 $\rightarrow$
+写 \texttt{/app/submit/submit.csv}（列：\texttt{segment\_id,c,na,i,bc,t}）。
+\item \textbf{环境}：\texttt{pytorch/pytorch:2.5.1-cuda12.4}，transformers 4.57.x，骨干权重离线本地加载。
+\end{itemize}
+单成员参数量约 1.2B（Whisper encoder + Qwen3-0.6B + 轻量融合头），推理一次仅载入一个成员，
+满足参数量与显存约束。
+
+\end{document}
