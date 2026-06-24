@@ -194,7 +194,7 @@ def main():
                 context_labels = batch["context_labels"].to(device, non_blocking=True)
                 segment_ids = batch["segment_id"]
 
-                with torch.amp.autocast("cuda", enabled=use_amp):
+                with torch.amp.autocast("cuda", enabled=(use_amp and device.type == "cuda")):
                     logits = model(
                         waveform=waveform,
                         input_ids=input_ids,

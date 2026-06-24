@@ -1,0 +1,45 @@
+# ============================================================
+# 复赛集成推理镜像 —— 以【官方 baseline】为底座。
+# 官方 baseline (finvcup/team35:finv_baseline) 在阿里云 cn-shanghai，国内可秒拉，
+# 自带 torch 2.5.1 / torchaudio 2.5.1 / cuda12.4 / python3.10。
+#
+# 推理正确性由 transformers==4.57.1 保证（模型结构、WhisperEncoder 内部实现由它决定）；
+# 瘦身 checkpoint 以 strict=False 叠加到预训练骨干，与 torch 版本无关。
+#
+# 用法（baseline 已 docker pull 到本地后）：
+#   docker build -f Dockerfile.baseline \
+#     --build-arg BASE_IMAGE=finvcup-registry.cn-shanghai.cr.aliyuncs.com/finvcup/team35:finv_baseline \
+#     -t finvcup-registry.cn-shanghai.cr.aliyuncs.com/finvcup/team18:v1 .
+# ============================================================
+ARG BASE_IMAGE=finvcup-registry.cn-shanghai.cr.aliyuncs.com/finvcup/team35:finv_baseline
+FROM ${BASE_IMAGE}
+
+ARG TRANSFORMERS_VERSION=4.57.1
+# 国内 PyPI 源，避免容器内 pip 超时
+ARG PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=false
+
+# baseline (py3.11) 已自带 torch2.5.1/torchaudio2.5.1 + transformers 4.57.6 + pynvml。
+# 推理已改为标准 encoder 前向，不依赖 transformers 内部实现，故沿用 baseline 的 4.57.6 不降级。
+# 仅补可能缺失的包（sklearn 被 src.utils 导入；pyyaml/tqdm/requests 保险起见一并装）。
+RUN pip install --no-cache-dir -i ${PIP_INDEX} \
+      pynvml requests scikit-learn pyyaml tqdm
+
+# ---- 模型骨干（最大、最稳定，放前面利于缓存）----
+COPY docker_assets/models/ /app/models/
+# ---- ensemble 成员 checkpoint + manifest ----
+COPY docker_assets/checkpoints/ /app/checkpoints/
+COPY docker_assets/logs/ /app/logs/
+# ---- 业务代码与推理配置 ----
+COPY src/ ./src/
+COPY configs/docker_infer_ensemble.yaml ./configs/docker_infer_ensemble.yaml
+COPY run.sh ./run.sh
+RUN chmod +x /app/run.sh && mkdir -p /xydata /app/submit
+
+VOLUME ["/xydata", "/app/submit"]

@@ -146,7 +146,7 @@ docker run --rm -it --gpus all \
 ```text
 train.sh                       # 训练入口
 run.sh                         # 推理入口 → /app/submit/submit.csv
-Dockerfile.infer               # 推理镜像
+Dockerfile.baseline            # 推理镜像（以官方 baseline 为底座）
 DOCKER_SUBMIT.md               # 镜像构建/提交手册
 configs/                       # 训练配置 + docker_infer_ensemble.yaml
 scripts/build_submit_image.sh  # 一键构建提交镜像

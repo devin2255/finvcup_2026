@@ -202,12 +202,13 @@ class WhisperAudioEncoder(nn.Module):
         with torch.amp.autocast("cuda", enabled=False):
             input_features = self._build_input_features(wave).to(wave.device)
 
-        if self.freeze and not self.encoder_has_trainable_layers:
-            with torch.no_grad():
-                hidden = self.encoder(input_features=input_features).last_hidden_state
+        if (not self.training) or (self.freeze and not self.encoder_has_trainable_layers):
+            # 推理(eval)或全冻结：走标准 encoder 前向。eval 下无 dropout、由调用方控制 no_grad，
+            # 与 _forward_encoder_split 数值等价，但不依赖 transformers WhisperEncoder 内部实现，
+            # 因此推理对 transformers 4.57.x 各小版本均稳健。
+            hidden = self.encoder(input_features=input_features).last_hidden_state
         else:
-            # Only the unfrozen tail layers build an autograd graph; the frozen
-            # prefix runs under no_grad to save activation memory.
+            # 训练且有可训练尾层：只让尾层建图，冻结前缀在 no_grad 下前向以省激活显存。
             hidden = self._forward_encoder_split(input_features)
 
         # Only attend to the tail portion of the time axis

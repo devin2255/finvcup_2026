@@ -8,10 +8,9 @@
 | 文件 | 作用 |
 |------|------|
 | `run.sh` | 镜像入口，容器内 `bash run.sh`，读 `/xydata` → 写 `/app/submit/submit.csv` |
-| `Dockerfile.infer` | 构建推理镜像（base = `pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime`，对齐训练机 torch 2.11/cu128） |
+| `Dockerfile.baseline` | 构建推理镜像（base = 官方 baseline `finvcup/team35:finv_baseline`，torch2.5.1/py3.11/transformers4.57.6；只补 sklearn 等少量包） |
 | `configs/docker_infer_ensemble.yaml` | 容器内 `/app` 路径配置（结构字段复制自 tuned 训练配置） |
-| `requirements.docker.txt` | 推理依赖（不含 torch，避免覆盖 base 镜像的 CUDA 版本） |
-| `scripts/build_submit_image.sh` | 暂存产物 → 构建镜像（一条命令） |
+| `scripts/build_submit_image.sh` | 暂存产物 → 构建镜像（一条命令；需在能正常 docker build 的机器上跑） |
 | `test_data/` | 10 条样例，仅用于本地自测（已被 `.dockerignore` 排除，不进镜像） |
 
 ## 一键构建（在服务器仓库根目录）

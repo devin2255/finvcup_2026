@@ -27,10 +27,8 @@ MANIFEST="${MANIFEST:-${RUN_DIR}/logs/ensemble_manifest.json}"
 WHISPER_DIR="${WHISPER_DIR:-/mnt/workspace/dorihue/modelscope/whisper-large-v3}"
 QWEN_DIR="${QWEN_DIR:-/mnt/workspace/dorihue/modelscope/Qwen3-0.6B}"
 IMAGE_TAG="${IMAGE_TAG:-finvcup-infer:latest}"
-BASE_IMAGE="${BASE_IMAGE:-pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime}"
-# 自动探测当前（训练）环境的版本注入镜像，确保镜像与训练机一致
-TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-$(python3 -c 'import transformers;print(transformers.__version__)' 2>/dev/null || echo 4.57.1)}"
-TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-$(python3 -c 'import torchaudio;print(torchaudio.__version__)' 2>/dev/null || echo 2.11.0+cu128)}"
+# 以官方 baseline 为底座（阿里云 cn-shanghai 可秒拉；自带 torch2.5.1/torchaudio2.5.1/py3.11/transformers4.57.6）
+BASE_IMAGE="${BASE_IMAGE:-finvcup-registry.cn-shanghai.cr.aliyuncs.com/finvcup/team35:finv_baseline}"
 
 echo "==> 源路径"
 echo "    MANIFEST    = ${MANIFEST}"
@@ -39,7 +37,6 @@ echo "    WHISPER_DIR = ${WHISPER_DIR}"
 echo "    QWEN_DIR    = ${QWEN_DIR}"
 echo "    IMAGE_TAG   = ${IMAGE_TAG}"
 echo "    BASE_IMAGE  = ${BASE_IMAGE}"
-echo "    transformers== ${TRANSFORMERS_VERSION}   torchaudio== ${TORCHAUDIO_VERSION}"
 
 # ---- 校验源文件存在 ----
 for p in "${MANIFEST}" "${CKPT_DIR}" "${WHISPER_DIR}" "${QWEN_DIR}"; do
@@ -126,18 +123,15 @@ PY
 echo "==> 暂存内容大小"
 du -sh "${ASSETS}"/* 2>/dev/null || true
 ASSET_GB=$(du -s "${ASSETS}" | awk '{printf "%.1f", $1/1024/1024}')
-echo "    docker_assets 合计 ${ASSET_GB} GB（基础镜像另算 ~9GB，目标镜像 ≤20GB）"
+echo "    docker_assets 合计 ${ASSET_GB} GB（baseline 底座 ~16GB，目标镜像 ~22GB，≤32G 上限）"
 
 # ---- 构建 ----
-# DSW 等受限容器里 BuildKit 的 mount 会被内核拒绝（operation not permitted），
-# 关掉 BuildKit 用老构建器即可绕过。
-export DOCKER_BUILDKIT=0
-echo "==> docker build (DOCKER_BUILDKIT=0)"
+# 注意：构建机需能正常 docker build（DSW 等受限容器因缺 CAP_SYS_ADMIN 无法 build/run，
+# 需在本地 PC / ECS 等正常 docker 环境构建）。
+echo "==> docker build (Dockerfile.baseline)"
 docker build \
-  -f Dockerfile.infer \
+  -f Dockerfile.baseline \
   --build-arg BASE_IMAGE="${BASE_IMAGE}" \
-  --build-arg TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION}" \
-  --build-arg TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION}" \
   -t "${IMAGE_TAG}" \
   .
 
