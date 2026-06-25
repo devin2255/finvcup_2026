@@ -73,6 +73,13 @@ def parse_args():
         help="某成员缺少某标签阈值时的兜底阈值",
     )
     p.add_argument("--output_csv", type=str, required=True, help="输出 pred.csv 路径")
+    p.add_argument(
+        "--vap_feat_dir",
+        type=str,
+        default=None,
+        help="测试集每条 segment 一份 18 维 VAP 特征所在目录（src.precompute_vap_test 产出）。"
+        "未提供时模型 vap_feat 分支自动喂零向量。",
+    )
     return p.parse_args()
 
 
@@ -149,11 +156,23 @@ def main():
     collate_fn = build_collate_fn(tokenizer, int(cfg["text_encoder"]["max_length"]))
 
     test_root = Path(args.test_root)
+    # CLI 覆盖 config.vap_feat.cache_dir；二者都没给则不加载 VAP（模型自动喂零）
+    vap_feat_dir = args.vap_feat_dir
+    if vap_feat_dir is None:
+        vf_cfg = cfg.get("vap_feat", {}) or {}
+        if bool(vf_cfg.get("enabled", False)):
+            vap_feat_dir = vf_cfg.get("test_cache_dir") or None
     ds = TurnTakingTestDataset(
         test_root=test_root,
         sample_rate=int(cfg["sample_rate"]),
         context_chunks=int(cfg["context_chunks"]),  # 归一化变长上下文到定长，支持复赛 (0,30] 动态时长
+        vap_feat_dir=vap_feat_dir,
+        vap_feat_dim=int((cfg.get("vap_feat", {}) or {}).get("feat_dim", 18)),
     )
+    if vap_feat_dir:
+        print(f"[ensemble] using per-segment VAP cache: {vap_feat_dir}")
+    else:
+        print("[ensemble] no VAP cache provided -> model will zero-fill vap_feat")
     bs = int(args.batch_size or cfg["train"]["eval_batch_size"])
     loader = DataLoader(
         ds,
@@ -192,12 +211,17 @@ def main():
                 context_labels = batch["context_labels"].to(device, non_blocking=True)
                 segment_ids = batch["segment_id"]
 
+                vap_feat = batch.get("vap_feat")
+                if vap_feat is not None:
+                    vap_feat = vap_feat.to(device, non_blocking=True)
+
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     logits = model(
                         waveform=waveform,
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         context_labels=context_labels,
+                        vap_feat=vap_feat,
                     )
                 probs = torch.sigmoid(logits).cpu().numpy()
                 if probs.ndim == 1:

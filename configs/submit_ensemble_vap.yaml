@@ -1,0 +1,126 @@
+# ============================================================
+# 复赛提交（变体 v2）：5-模型 ensemble + 真 VAP 特征
+#
+# 与 v1（单模型 + 零填充 VAP）的区别：
+#   1) 用 ensemble_ep3~7 五个 checkpoint 多数投票（infer_ensemble.py）；
+#   2) 容器内对 /xydata 现场预计算 VAP（precompute_vap_test.py），
+#      训练/推理分布对齐，性能不打折。
+# 模型量：whisper-large-v3 (1.54B) + Qwen3-0.6B (0.6B) = 2.14B < 8B ✓
+# ============================================================
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8
+
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125
+  max_context_chunks: 375
+  context_prob: 0.5
+
+paths:
+  project_root: /app
+  train_audio_dir: /app/data/train/audio
+  train_text_dir: /app/data/train/text
+  train_labels_dir: /app/data/train/labels
+
+  output_root: /app/outputs/submit
+  # ensemble 推理读 manifest + 成员 checkpoints。我们把它们 COPY 到 /app/ckpt/。
+  checkpoints_dir: /app/ckpt
+  logs_dir: /app/ckpt
+
+  cache_root: /app/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: /app/models/whisper-large-v3
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2
+  tail_ratio: 0.25
+
+text_encoder:
+  model_name: /app/models/Qwen3-0.6B
+  max_length: 256
+  freeze_backbone: true
+
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 40
+  max_steps_per_epoch: 500
+  eval_valid_sample_count: 30000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  batch_size: 128
+  eval_batch_size: 256
+  log_every_steps: 40
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.2e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.03
+  ema_decay: 0.999
+  grad_clip_norm: 1.0
+  use_amp: true
+  use_ema: true
+
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_vapfeat.pt
+  early_stop_patience: 15
+
+  ensemble_topk: 5
+
+vap_aux:
+  enabled: false
+
+# 真 VAP 特征：cache_dir 是训练侧（per-conv）；test_cache_dir 是推理侧（per-segment）
+# infer_ensemble.py 默认从 test_cache_dir 读取（也可被 --vap_feat_dir 覆盖）。
+vap_feat:
+  enabled: true
+  feat_dim: 18
+  frame_rate: 10
+  cache_dir: /app/.cache/vap_ch_kyoto
+  test_cache_dir: /app/.cache/vap_test
+
+env:
+  HF_HOME: /app/.cache/huggingface
+  TRANSFORMERS_CACHE: /app/.cache/huggingface
+  TORCH_HOME: /app/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TOKENIZERS_PARALLELISM: "false"

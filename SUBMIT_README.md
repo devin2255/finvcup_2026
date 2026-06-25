@@ -1,10 +1,16 @@
-# 第11届信也科技杯 复赛提交说明（单模型）
+# 第11届信也科技杯 复赛提交说明
 
-多模态话权预测（Turn-Taking）单模型：**Whisper-large-v3（音频）+ Qwen3-0.6B（文本）+ 上下文标签编码器**，
-经低秩双线性融合后多标签输出未来 2s 内 5 个事件（C/NA/I/BC/T）是否发生。
+多模态话权预测（Turn-Taking）：**Whisper-large-v3（音频）+ Qwen3-0.6B（文本）+ 上下文标签编码器 + VAP 第5模态**，经低秩双线性融合后多标签输出未来 2s 内 5 个事件（C/NA/I/BC/T）是否发生。
 
 - 模型参数量：1.54B + 0.6B = **2.14B < 8B** ✓
 - 推理全程离线（`HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`），不连任何网络。
+
+本仓库含两种提交镜像：
+
+| 变体 | Dockerfile | 入口 | 特点 |
+|---|---|---|---|
+| **v1 单模型 + 零填充 VAP** | `Dockerfile` | `run.sh` | 单 checkpoint(ep6) + per-label 阈值；VAP 喂 0；最快、镜像最小 |
+| **v2 ensemble + 真 VAP** | `Dockerfile.ensemble_vap` | `run.ensemble_vap.sh`（镜像内 = `run.sh`） | 5 个 checkpoint 多数投票；容器内现场预计算 VAP（双 Python 环境） |
 
 ## 目录结构（镜像内 /app）
 
@@ -85,10 +91,37 @@ bash run.sh
 
   未提供缓存时训练仍可运行（VAP 退化为零向量）。
 
+## v2 镜像构建/运行（ensemble + 真 VAP）
+
+构建前先把以下资产放好：
+
+```powershell
+# 1) 主权重 + 5 个 checkpoint + CPC 权重 + VAP 权重 全部 staging 到仓库根
+powershell -File scripts\download_vap_weight.ps1          # 下 vap_mc_ch_kyoto 权重
+powershell -File scripts\stage_submission_ensemble.ps1   # 把所有资产复制到 models\ ckpt\
+
+# 2) 构建 v2 镜像
+docker build -f Dockerfile.ensemble_vap -t finvcup-infer:v2-ens .
+
+# 3) 本地冒烟
+docker run --rm -it --gpus all `
+  -v D:\path\to\test_data:/xydata:ro `
+  -v D:\path\to\out:/app/submit `
+  finvcup-infer:v2-ens bash
+#   容器内: bash run.sh
+```
+
+v2 内部为两阶段：
+- 阶段 A：`/opt/maai-env`（torch 2.6 + MaAI）对 `/xydata/audio/*.wav` 预计算 18 维 VAP 特征 → `/app/.cache/vap_test/<seg>.npy`
+- 阶段 B：主环境 5 模型 ensemble 投票，每个模型用各自 best thresholds，写 `/app/submit/submit.csv`
+
 ## 注意事项
 
 - 基础镜像 CUDA 12.4（torch 2.5.1 / python 3.10）；构建时仅升级 `transformers>=4.51`
-  （Qwen3 需要）并安装 `pynvml`，不重装 torch。
+  （Qwen3 需要）并安装 `pynvml/requests`，不重装主环境 torch。
+- v2 多一个 `/opt/maai-env` venv 装 torch 2.6.0+cu124 + MaAI（`--no-deps`，
+  绕开它 pyproject 里 `transformers==5.5.3` 这种存在性可疑的 pin）。
 - 测试音频为 5–30s 不定长；`context` 上下文标签序列长度 (0,30] 动态，
   推理时统一归一化到 375 chunk（不足前补 NA=4）。
-- 推理超时限制 60 分钟内。
+- 推理超时限制 60 分钟内。v2 经验：VAP 预计算耗时 ≈ 测试集音频总时长 / 实时倍率；
+  5 模型每个推理 ≈ 8-12 分钟，时间紧时可在 `run.sh` 给 `--topk 3` 削成 top-3 投票。

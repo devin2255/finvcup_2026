@@ -1,0 +1,116 @@
+# ============================================================
+# 复赛提交镜像 v2：5-模型 ensemble + 真 VAP 特征
+#
+# 关键技术决定：双 Python 环境（共享同一 CUDA12.4 运行时）
+#   - 系统 python3.10 + 基础镜像 torch 2.5.1 -> 主推理（infer_ensemble）
+#   - /opt/maai-env (新建 venv) + torch 2.6.0 + MaAI(--no-deps) -> 仅做 VAP 预计算
+#   这样能在一个镜像里同时满足"我们模型的 torch 2.5.1"与"MaAI 的 torch>=2.6"。
+#
+# 构建（先跑 scripts/stage_submission_ensemble.ps1 准备 models/ ckpt/ MaAI/）：
+#   docker build -f Dockerfile.ensemble_vap -t finvcup-infer:v2-ens .
+# ============================================================
+FROM finvcup-registry.cn-shanghai.cr.aliyuncs.com/finvcup/team35:finv_baseline
+
+WORKDIR /app
+
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    TOKENIZERS_PARALLELISM=false \
+    PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=600
+
+# -------- 主环境：保留基础镜像 torch 2.5.1；只升 transformers/装 pynvml/requests --------
+RUN pip install --no-cache-dir --upgrade \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        "transformers>=4.51,<5" \
+        "tokenizers>=0.21" \
+        pynvml \
+        requests \
+        pyyaml \
+        tqdm
+
+# -------- maai 子环境：完全隔离 venv（不用 --system-site-packages）+ torch 2.6.0 (cu124) --------
+# 为什么不 --system-site-packages：基础镜像 torch 2.5.1 自带的 nvidia-* 包会被 pip
+# 误判为"约束已满足"，于是不为 torch 2.6 装新版 nvidia-cusparselt-cu12 等运行时，
+# 启动时报 libcudart.so.12 / libcusparseLt.so.0 找不到。隔离 venv 后 pip 会跟着
+# torch 2.6 wheel 的 dependency metadata 把所有 nvidia-* cu12 包装到 venv 自己的
+# site-packages，约多 ~1-2 GB 但功能正确。
+# torch wheel 通过 BuildKit --mount=type=bind 临时只读挂入，安装完不入镜像层。
+# torchaudio 装 CPU 版即可（precompute_vap_test 只在 sample_rate 不匹配时用到 resample，CPU op）。
+RUN --mount=type=bind,source=models/torch-2.6.0+cu124-cp311-cp311-linux_x86_64.whl,target=/tmp/torch-2.6.0+cu124-cp311-cp311-linux_x86_64.whl \
+    python3 -m venv /opt/maai-env \
+    && /opt/maai-env/bin/python -m pip install --no-cache-dir --upgrade \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple pip \
+    && /opt/maai-env/bin/pip install --no-cache-dir \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        /tmp/torch-2.6.0+cu124-cp311-cp311-linux_x86_64.whl \
+    && /opt/maai-env/bin/pip install --no-cache-dir --no-deps \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        "torchaudio==2.6.0" \
+    && /opt/maai-env/bin/pip install --no-cache-dir \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        "huggingface_hub>=0.24" \
+        "einops>=0.7" \
+        numpy \
+        soundfile
+
+# MaAI 本体：只 COPY 源码，不 pip install。
+# precompute_vap_test.py 通过 sys.path.insert(0, '/app/MaAI/src') 直接 import maai；
+# 这样避免触发 hatch-vcs（pyproject 用 dynamic version=vcs，没 .git 就报错），
+# 同时彻底跳过 pyproject 里那行可疑的 transformers==5.5.3 之类的依赖锁。
+COPY MaAI/ /app/MaAI/
+
+# pyaudio / pygame stub：MaAI/src/maai/input.py 顶部硬 import 这两个，但只在 Mic/
+# Speaker 实时音频路径才用；我们用 MaaiInput.Zero() 喂离线数据，从不实例化它们。
+# 装真包要 apt portaudio19-dev、SDL 之类一堆系统库，体积大且无意义。直接给两个
+# 仅满足 import 的最小 stub 放进 maai-env 的 site-packages。
+RUN PYAUDIO_STUB=/opt/maai-env/lib/python3.11/site-packages/pyaudio.py && \
+    printf '%s\n' \
+        '"""minimal stub — never invoked at runtime; only satisfies module-level import."""' \
+        'paInt16 = 8' \
+        'paFloat32 = 1' \
+        'paContinue = 0' \
+        'paComplete = 1' \
+        'class Stream: pass' \
+        'class PyAudio:' \
+        '    def __init__(self): pass' \
+        '    def get_device_count(self): return 0' \
+        '    def get_device_info_by_index(self, i): return {}' \
+        '    def open(self, *a, **k): return Stream()' \
+        '    def terminate(self): pass' \
+        > "$PYAUDIO_STUB" && \
+    PYGAME_DIR=/opt/maai-env/lib/python3.11/site-packages/pygame && \
+    mkdir -p "$PYGAME_DIR" && \
+    printf '%s\n' \
+        '"""minimal stub — never invoked at runtime."""' \
+        'from . import mixer' \
+        > "$PYGAME_DIR/__init__.py" && \
+    printf '%s\n' \
+        '"""minimal stub."""' \
+        'def init(*a, **k): pass' \
+        'def quit(*a, **k): pass' \
+        'class Sound:' \
+        '    def __init__(self, *a, **k): pass' \
+        '    def play(self, *a, **k): pass' \
+        > "$PYGAME_DIR/mixer.py"
+
+# -------- 代码与配置（主环境用） --------
+COPY src/ /app/src/
+COPY configs/submit_ensemble_vap.yaml /app/configs/submit_ensemble_vap.yaml
+COPY run.ensemble_vap.sh /app/run.sh
+COPY train.sh /app/train.sh
+COPY SUBMIT_README.md /app/README.md
+
+# 模型权重 / 5-成员 checkpoint / manifest
+COPY models/ /app/models/
+COPY ckpt/   /app/ckpt/
+
+RUN sed -i 's/\r$//' /app/run.sh /app/train.sh \
+    && chmod +x /app/run.sh /app/train.sh \
+    && mkdir -p /app/submit /app/.cache/vap_test
+
+# 快速静态校验：必要 import 在两个环境里都能解
+RUN python3 -c "import functools,os,subprocess,time,requests,pynvml; from urllib.error import HTTPError; import torch, transformers; print('main env ok torch=', torch.__version__, 'tfm=', transformers.__version__)" \
+ && /opt/maai-env/bin/python -c "import torch, sys; sys.path.insert(0,'/app/MaAI/src'); from maai import Maai, MaaiInput; print('maai env ok torch=', torch.__version__)"
+
+CMD ["bash", "run.sh"]

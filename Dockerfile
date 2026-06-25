@@ -15,11 +15,13 @@ ENV HF_HUB_OFFLINE=1 \
     PYTHONUNBUFFERED=1
 
 # 依赖：Qwen3-0.6B 需要 transformers>=4.51（基础镜像自带版本可能偏旧）；
-# 官方要求安装 pynvml。注意：不重装 torch/torchaudio，沿用基础镜像的 CUDA 版本。
+# 官方打分文件 import pynvml + requests，必须装。注意：不重装 torch/torchaudio，
+# 沿用基础镜像的 CUDA 版本。
 RUN pip install --no-cache-dir --upgrade \
         "transformers>=4.51,<5" \
         "tokenizers>=0.21" \
         pynvml \
+        requests \
         pyyaml \
         tqdm
 

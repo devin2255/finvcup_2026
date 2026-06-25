@@ -363,6 +363,8 @@ class TurnTakingTestDataset(Dataset):
         test_root: Path,
         sample_rate: int,
         context_chunks: int = 375,
+        vap_feat_dir: Optional[str] = None,
+        vap_feat_dim: int = 18,
     ) -> None:
         self.sample_rate = sample_rate
         self.context_chunks = int(context_chunks)
@@ -371,6 +373,10 @@ class TurnTakingTestDataset(Dataset):
         self.text_dir = self.base / "text"
         self.context_dir = self.base / "context"
         self.segment_ids = sorted([p.stem for p in self.context_dir.glob("*.npy")])
+        # 可选：每条 segment 一份 18 维 VAP 特征（src.precompute_vap_test 产出）。
+        # 缺失或文件不存在时退化为零向量，保持架构对齐。
+        self.vap_feat_dir = Path(vap_feat_dir) if vap_feat_dir else None
+        self.vap_feat_dim = int(vap_feat_dim)
 
     def __len__(self) -> int:
         return len(self.segment_ids)
@@ -410,12 +416,23 @@ class TurnTakingTestDataset(Dataset):
         if src_sr != self.sample_rate:
             wave = torchaudio.functional.resample(wave, src_sr, self.sample_rate)
 
-        return {
+        out = {
             "segment_id": seg_id,
             "waveform": wave,
             "text": text,
             "context_labels": torch.from_numpy(context_labels),
         }
+        if self.vap_feat_dir is not None:
+            vf = np.zeros(self.vap_feat_dim, dtype=np.float32)
+            vp = self.vap_feat_dir / f"{seg_id}.npy"
+            if vp.exists():
+                arr = np.load(vp).astype(np.float32).reshape(-1)
+                if arr.shape[0] >= self.vap_feat_dim:
+                    vf = arr[: self.vap_feat_dim]
+                else:
+                    vf[: arr.shape[0]] = arr
+            out["vap_feat"] = torch.from_numpy(vf)
+        return out
 
 
 class CollateFn:
