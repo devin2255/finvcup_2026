@@ -176,6 +176,7 @@ def main():
         context_chunks=int(cfg["context_chunks"]),  # 归一化变长上下文到定长，支持复赛 (0,30] 动态时长
         vap_feat_dir=vap_feat_dir,
         vap_feat_dim=int((cfg.get("vap_feat", {}) or {}).get("feat_dim", 18)),
+        vap_window=int((cfg.get("vap_feat", {}) or {}).get("window", 20)),
     )
     if vap_feat_dir:
         print(f"[ensemble] using per-segment VAP cache: {vap_feat_dir}")
