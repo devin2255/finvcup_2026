@@ -29,7 +29,9 @@ MAAI_DIR=/app/MaAI
 
 t0=$(date +%s)
 
-# -------- 阶段 A：VAP 预计算（maai-env） --------
+# -------- 阶段 A：VAP 预计算（maai-env，4 进程并行） --------
+# 单进程基准 ~80 frame/s -> 1000 段 ~66 min 超时；4 进程实测 ~18-22 min。
+# 可通过环境变量 VAP_WORKERS 调整（评测机 GPU 显存紧张时降到 2）。
 echo "[run] === Stage A: VAP precompute ==="
 /opt/maai-env/bin/python -m src.precompute_vap_test \
   --maai_dir "${MAAI_DIR}" \
@@ -39,7 +41,8 @@ echo "[run] === Stage A: VAP precompute ==="
   --vap_local_model "${VAP_LOCAL}" \
   --test_root "${TEST_ROOT}" \
   --out_dir "${VAP_CACHE}" \
-  --sample_rate 16000
+  --sample_rate 16000 \
+  --workers "${VAP_WORKERS:-4}"
 
 t1=$(date +%s)
 echo "[run] stage A done in $((t1 - t0))s"

@@ -80,6 +80,13 @@ def parse_args():
         help="测试集每条 segment 一份 18 维 VAP 特征所在目录（src.precompute_vap_test 产出）。"
         "未提供时模型 vap_feat 分支自动喂零向量。",
     )
+    p.add_argument(
+        "--ensemble_mode",
+        choices=["soft", "hard"],
+        default="soft",
+        help="soft=5 模型 sigmoid 概率取均值再用'阈值均值'二值化（推荐：保留 ep6 等强模型的"
+        "高置信预测，不被弱模型多数票稀释）；hard=每模型用自己阈值二值化后多数投票（>=3 票）。",
+    )
     return p.parse_args()
 
 
@@ -140,11 +147,12 @@ def main():
 
     members, manifest_path = _resolve_members(args, cfg)
     num_members = len(members)
-    # 严格多数：得票 > 半数。5 个成员 => >=3 票。
     majority_need = num_members // 2 + 1
+    mode = args.ensemble_mode
     print(
         f"[ensemble] manifest={manifest_path}\n"
-        f"[ensemble] 成员数={num_members}，逐标签多数投票阈值=>={majority_need} 票（每个模型用各自最优阈值）"
+        f"[ensemble] 成员数={num_members} 模式={mode}"
+        + (f" 多数投票>={majority_need} 票" if mode == "hard" else " 概率均值 + 阈值均值二值化")
     )
     for m in members:
         print(f"  - {m['name']} (epoch={m.get('epoch')}, metric={m.get('metric')})")
@@ -174,25 +182,35 @@ def main():
     else:
         print("[ensemble] no VAP cache provided -> model will zero-fill vap_feat")
     bs = int(args.batch_size or cfg["train"]["eval_batch_size"])
+    # 推理时硬 num_workers=0：评测容器 /dev/shm 默认仅 64 MB，
+    # 多 worker 数据传递走 shm 会立刻 Bus error / "No space left on device"。
+    # 1000 段 4 batch × 5 模型 = 20 batch，瓶颈在 GPU forward 不在数据预取，
+    # 单进程加载完全够。
     loader = DataLoader(
         ds,
         batch_size=bs,
         shuffle=False,
-        num_workers=int(cfg["num_workers"]),
+        num_workers=0,
         collate_fn=collate_fn,
         pin_memory=True,
     )
     use_amp = bool(cfg["train"].get("use_amp", False))
     limit = args.max_segments
 
-    # 逐标签累计票数：seg_id -> np.ndarray[n_labels]（int 计票）
+    # 累加结构（hard 与 soft 共用一遍 forward，避免重算）：
+    #   votes[seg_id]      = 每标签得票数（hard 用）
+    #   sum_probs[seg_id]  = 每标签概率累加（soft 用）
+    #   sum_thr            = 所有成员阈值累加（soft 用，最后除 num_members 取均值）
     votes: dict[str, np.ndarray] = {}
+    sum_probs: dict[str, np.ndarray] = {}
+    sum_thr = np.zeros(n_labels, dtype=np.float64)
     seg_order: list[str] = []  # 保持首次出现顺序（loader 确定性，各成员一致）
 
     for mi, member in enumerate(members):
         ckpt = torch.load(member["path"], map_location="cpu")
         thr_map = _member_thresholds(member, ckpt, label_cols, args.default_threshold)
         thr_vec = np.array([thr_map[name] for name in label_cols], dtype=np.float32)
+        sum_thr += thr_vec.astype(np.float64)
 
         model = MultimodalTurnTakingModel(cfg).to(device)
         # 瘦身/完整 checkpoint 均兼容：strict=False 叠加可训练参数到预训练骨干上。
@@ -233,11 +251,13 @@ def main():
                         raise RuntimeError(
                             f"logits dim {p.shape[0]} != len(multi_targets) {n_labels}"
                         )
-                    vote = (p >= thr_vec).astype(np.int64)  # 用该模型自己的阈值
+                    vote = (p >= thr_vec).astype(np.int64)  # 该模型自己阈值二值化（hard 用）
                     if seg_id not in votes:
                         votes[seg_id] = np.zeros(n_labels, dtype=np.int64)
+                        sum_probs[seg_id] = np.zeros(n_labels, dtype=np.float64)
                         seg_order.append(seg_id)
                     votes[seg_id] += vote
+                    sum_probs[seg_id] += p.astype(np.float64)
                     member_pos += vote
                     done += 1
                     if limit is not None and done >= limit:
@@ -254,18 +274,38 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    # 逐标签多数投票 -> 最终 0/1
+    # ---- 聚合：按 mode 产出 final 0/1 ----
     out_path = Path(args.output_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["segment_id"] + label_cols
     rows: list[dict] = []
-    for seg_id in seg_order:
-        v = votes[seg_id]
-        final = (v >= majority_need).astype(int)
-        row = {"segment_id": seg_id}
-        for j, col in enumerate(label_cols):
-            row[col] = int(final[j])
-        rows.append(row)
+
+    if mode == "soft":
+        mean_thr_vec = (sum_thr / num_members).astype(np.float64)
+        print(f"[ensemble] soft: mean thresholds per label = "
+              f"{ {name: round(float(mean_thr_vec[j]), 3) for j, name in enumerate(label_cols)} }")
+        pos_count = np.zeros(n_labels, dtype=np.int64)
+        for seg_id in seg_order:
+            mean_p = sum_probs[seg_id] / num_members
+            final = (mean_p >= mean_thr_vec).astype(int)
+            pos_count += final
+            row = {"segment_id": seg_id}
+            for j, col in enumerate(label_cols):
+                row[col] = int(final[j])
+            rows.append(row)
+        pos_rate = ", ".join(
+            f"{name}={pos_count[j]/max(1,len(seg_order)):.3f}"
+            for j, name in enumerate(label_cols)
+        )
+        print(f"[ensemble] soft final positive rate per label: [{pos_rate}]")
+    else:  # hard
+        for seg_id in seg_order:
+            v = votes[seg_id]
+            final = (v >= majority_need).astype(int)
+            row = {"segment_id": seg_id}
+            for j, col in enumerate(label_cols):
+                row[col] = int(final[j])
+            rows.append(row)
 
     rows = sorted(rows, key=lambda r: r["segment_id"])
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -274,7 +314,7 @@ def main():
         w.writerows(rows)
 
     print(
-        f"\n[ensemble] {num_members} 个模型多数投票完成，写出 {len(rows)} 行 -> {out_path.resolve()}"
+        f"\n[ensemble] mode={mode} {num_members} 模型聚合完成，写出 {len(rows)} 行 -> {out_path.resolve()}"
     )
 
 
