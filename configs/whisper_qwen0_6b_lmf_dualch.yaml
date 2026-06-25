@@ -1,0 +1,132 @@
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8
+
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125
+  max_context_chunks: 375
+  context_prob: 0.5
+
+# ============================================================
+# VAP 特征(晚融合第5模态)实验：在调优版(4xL20_tuned)基础上，把预训练
+# vap_mc_ch_kyoto 的逐帧话轮先验(预计算缓存)拼进融合表征。独立输出目录，
+# 与无-VAP 调优版干净 A/B。VAP 不进训练图(冻结预计算)，推理零额外预算。
+# 注意：vap_aux(辅助头)在本配置关闭，避免两套机制混淆。
+# ============================================================
+paths:
+  project_root: /mnt/workspace/dorihue/finvcup_2026
+  train_audio_dir: /mnt/workspace/dorihue/finvcup_2026/train/audio
+  train_text_dir: /mnt/workspace/dorihue/finvcup_2026/train/text
+  train_labels_dir: /mnt/workspace/dorihue/finvcup_2026/train/labels
+
+  output_root: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_dualch
+  checkpoints_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_dualch/checkpoints
+  logs_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_dualch/logs
+
+  cache_root: /mnt/workspace/dorihue/finvcup_2026/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: /mnt/workspace/dorihue/modelscope/whisper-large-v3
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2
+  tail_ratio: 0.25
+  # 双声道活动分支（#1）：Whisper 仍单声道，额外一个轻量 2-声道 mel-CNN 看末 tail_sec
+  # 秒，捕捉声道活动/重叠（利好 BC/I/T）。与 lmf_vapfeat 只差此分支，干净 A/B。
+  stereo_branch:
+    enabled: true
+    n_mels: 64
+    conv_channels: [32, 64, 96]
+    tail_sec: 6.0
+    dropout: 0.1
+
+text_encoder:
+  model_name: /mnt/workspace/dorihue/modelscope/Qwen3-0.6B
+  max_length: 256
+  freeze_backbone: true
+
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 40
+  max_steps_per_epoch: 500
+  eval_valid_sample_count: 30000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  batch_size: 128
+  eval_batch_size: 256
+  log_every_steps: 40
+  gradient_accumulation_steps: 1
+
+  learning_rate: 1.2e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.03
+  ema_decay: 0.999
+  grad_clip_norm: 1.0
+  use_amp: true
+  use_ema: true
+
+  save_metric: best_f1
+  best_checkpoint_name: best_lmf_dualch.pt
+  early_stop_patience: 15
+
+  ensemble_topk: 5
+
+# VAP 辅助头：本实验关闭（用"特征注入"而非"辅助任务"）
+vap_aux:
+  enabled: false
+
+# ============================================================
+# VAP 特征晚融合（第5模态）。需先用 src.precompute_vap 把逐帧特征缓存到 cache_dir。
+#   feat_dim=18: [p_now(2), p_future(2), vad(2), p_bins(8), p_bins_now(2), p_bins_future(2)]
+#   frame_rate=10: 与预计算一致；dataset 按 end_idx 映射 vap_frame=round(end_idx*chunk_ms*fr/1000)
+# ============================================================
+vap_feat:
+  enabled: true
+  feat_dim: 18
+  frame_rate: 10
+  cache_dir: /mnt/workspace/dorihue/finvcup_2026/.cache/vap_ch_kyoto
+
+env:
+  HF_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
+  TRANSFORMERS_CACHE: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
+  TORCH_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
