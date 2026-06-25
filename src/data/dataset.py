@@ -11,6 +11,8 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
+from src.vap_window import _extract_vap_window
+
 
 @dataclass
 class TrainSample:
@@ -176,6 +178,7 @@ class TurnTakingTrainDataset(Dataset):
         vap_feat_dir: Optional[str] = None,
         vap_frame_rate: float = 10.0,
         vap_feat_dim: int = 18,
+        vap_window: int = 20,
     ) -> None:
         self.samples = list(samples)
         self.train_audio_dir = train_audio_dir
@@ -199,6 +202,7 @@ class TurnTakingTrainDataset(Dataset):
         self.vap_feat_dir = Path(vap_feat_dir) if vap_feat_dir else None
         self.vap_frame_rate = float(vap_frame_rate)
         self.vap_feat_dim = int(vap_feat_dim)
+        self.vap_window = int(vap_window)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -341,12 +345,9 @@ class TurnTakingTrainDataset(Dataset):
             out["vap_target"] = vap_grid
         if self.vap_feat_dir is not None:
             arr = self._load_vap_feats(sample.conv_id)
-            vf = np.zeros(self.vap_feat_dim, dtype=np.float32)
-            if arr is not None and arr.shape[0] > 0:
-                fr = int(round(end_idx * self.chunk_ms * self.vap_frame_rate / 1000.0))
-                fr = min(max(fr, 0), arr.shape[0] - 1)
-                vf = np.asarray(arr[fr], dtype=np.float32)
-            out["vap_feat"] = torch.from_numpy(vf)
+            fr = int(round(end_idx * self.chunk_ms * self.vap_frame_rate / 1000.0))
+            win = _extract_vap_window(arr, fr, self.vap_window, self.vap_feat_dim)  # [N, D]
+            out["vap_feat"] = torch.from_numpy(win)
         if hasattr(sample, "label_vec"):
             out["label"] = torch.tensor(sample.label_vec, dtype=torch.float32)
         else:
@@ -365,6 +366,7 @@ class TurnTakingTestDataset(Dataset):
         context_chunks: int = 375,
         vap_feat_dir: Optional[str] = None,
         vap_feat_dim: int = 18,
+        vap_window: int = 20,
     ) -> None:
         self.sample_rate = sample_rate
         self.context_chunks = int(context_chunks)
@@ -377,6 +379,7 @@ class TurnTakingTestDataset(Dataset):
         # 缺失或文件不存在时退化为零向量，保持架构对齐。
         self.vap_feat_dir = Path(vap_feat_dir) if vap_feat_dir else None
         self.vap_feat_dim = int(vap_feat_dim)
+        self.vap_window = int(vap_window)
 
     def __len__(self) -> int:
         return len(self.segment_ids)
@@ -423,15 +426,13 @@ class TurnTakingTestDataset(Dataset):
             "context_labels": torch.from_numpy(context_labels),
         }
         if self.vap_feat_dir is not None:
-            vf = np.zeros(self.vap_feat_dim, dtype=np.float32)
+            arr = None
             vp = self.vap_feat_dir / f"{seg_id}.npy"
             if vp.exists():
-                arr = np.load(vp).astype(np.float32).reshape(-1)
-                if arr.shape[0] >= self.vap_feat_dim:
-                    vf = arr[: self.vap_feat_dim]
-                else:
-                    vf[: arr.shape[0]] = arr
-            out["vap_feat"] = torch.from_numpy(vf)
+                arr = np.load(vp).astype(np.float32)
+            fr = (arr.shape[0] - 1) if (arr is not None and arr.ndim == 2 and arr.shape[0] > 0) else 0
+            win = _extract_vap_window(arr, fr, self.vap_window, self.vap_feat_dim)  # [N, D]
+            out["vap_feat"] = torch.from_numpy(win)
         return out
 
 
