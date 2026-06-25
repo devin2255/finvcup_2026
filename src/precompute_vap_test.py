@@ -20,23 +20,9 @@ import numpy as np
 import torch
 
 from src.data.dataset import _read_wav_slice
+from src.vap_window import vap_last_n_frames
 
 VAP_FEAT_DIM = 18
-
-
-def _flat_result(r: dict) -> list:
-    pn = [float(x) for x in r.get("p_now", [0.0, 0.0])]
-    pf = [float(x) for x in r.get("p_future", [0.0, 0.0])]
-    vd = [float(x) for x in r.get("vad", [0.0, 0.0])]
-    pb = r.get("p_bins")
-    pb_flat = []
-    if pb is not None:
-        for spk in pb:
-            pb_flat.extend(float(x) for x in spk)
-    pb_flat = (pb_flat + [0.0] * 8)[:8]
-    pbn = [float(x) for x in r.get("p_bins_now", [0.0, 0.0])]
-    pbf = [float(x) for x in r.get("p_bins_future", [0.0, 0.0])]
-    return pn + pf + vd + pb_flat + pbn + pbf
 
 
 def _load_seg_2ch(audio_path: Path, target_sr: int) -> np.ndarray:
@@ -50,29 +36,6 @@ def _load_seg_2ch(audio_path: Path, target_sr: int) -> np.ndarray:
         import torchaudio
         w = torchaudio.functional.resample(w, sr, target_sr)
     return w.numpy().astype(np.float32)
-
-
-def vap_last_frame_feature(maai, audio2: np.ndarray, frame_samples: int) -> np.ndarray:
-    """流式跑一遍该 segment, 返回最后一帧的 18 维特征。"""
-    maai.reset_runtime_state()
-    q = maai.result_dict_queue
-    while not q.empty():
-        q.get()
-
-    T = audio2.shape[1]
-    last_feat = None
-    for i in range(0, T, frame_samples):
-        c1 = np.ascontiguousarray(audio2[0, i:i + frame_samples])
-        c2 = np.ascontiguousarray(audio2[1, i:i + frame_samples])
-        if c1.shape[0] == 0:
-            break
-        maai.process(c1, c2)
-        while not q.empty():
-            last_feat = _flat_result(q.get())
-
-    if last_feat is None:
-        return np.zeros((VAP_FEAT_DIM,), dtype=np.float32)
-    return np.asarray(last_feat, dtype=np.float32)
 
 
 # ============================================================
@@ -107,6 +70,7 @@ def _worker_init(init_args: dict):
         "audio_dir": init_args["audio_dir"],
         "out_dir": init_args["out_dir"],
         "overwrite": init_args["overwrite"],
+        "window": int(init_args["window"]),
     }
     print(f"[worker pid={os.getpid()}] MaAI loaded, frame_samples={_W_CFG['frame_samples']}",
           flush=True)
@@ -120,7 +84,7 @@ def _worker_process_seg(sid: str) -> tuple[str, bool, str]:
         return sid, True, "skip-exists"
     try:
         audio2 = _load_seg_2ch(Path(_W_CFG["audio_dir"]) / f"{sid}.wav", _W_CFG["sample_rate"])
-        feat = vap_last_frame_feature(_W_MAAI, audio2, _W_CFG["frame_samples"])
+        feat = vap_last_n_frames(_W_MAAI, audio2, _W_CFG["frame_samples"], _W_CFG["window"])
         np.save(out_path, feat)
         return sid, True, "ok"
     except Exception as e:
@@ -145,6 +109,7 @@ def main():
     ap.add_argument("--out_dir", type=str, required=True)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--max_segments", type=int, default=None)
+    ap.add_argument("--window", type=int, default=20, help="保留最后 N 帧 VAP 特征 -> (N,18)")
     ap.add_argument("--workers", type=int, default=1,
                     help="并行 worker 进程数。每进程占一份 MaAI(GPU 共享)。建议 2-4。")
     args = ap.parse_args()
@@ -167,6 +132,7 @@ def main():
         device=args.device, sample_rate=args.sample_rate,
         audio_dir=str(audio_dir), out_dir=str(out_dir),
         overwrite=bool(args.overwrite),
+        window=int(args.window),
     )
 
     print(f"[run] segments={len(seg_ids)} workers={args.workers} "
