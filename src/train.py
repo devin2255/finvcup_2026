@@ -285,6 +285,7 @@ def main():
     vap_feat_dir = vapfeat_cfg.get("cache_dir") if use_vap_feat else None
     vap_feat_rate = float(vapfeat_cfg.get("frame_rate", 10.0))
     vap_feat_dim_cfg = int(vapfeat_cfg.get("feat_dim", 18))
+    vap_feat_window_cfg = int(vapfeat_cfg.get("window", 20))
     if is_main and use_vap_feat:
         print(f"[VAP-feat] enabled: cache_dir={vap_feat_dir}, frame_rate={vap_feat_rate}, dim={vap_feat_dim_cfg}")
 
@@ -309,6 +310,7 @@ def main():
         vap_feat_dir=vap_feat_dir,
         vap_frame_rate=vap_feat_rate,
         vap_feat_dim=vap_feat_dim_cfg,
+        vap_window=vap_feat_window_cfg,
     )
     valid_dataset = TurnTakingTrainDataset(
         samples=valid_eval_samples,
@@ -325,6 +327,7 @@ def main():
         vap_feat_dir=vap_feat_dir,
         vap_frame_rate=vap_feat_rate,
         vap_feat_dim=vap_feat_dim_cfg,
+        vap_window=vap_feat_window_cfg,
     )
 
     train_sampler = (
