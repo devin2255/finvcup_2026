@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, WhisperFeatureExtractor, WhisperModel
 
+from src.vap_pool import VapWindowEncoder
+
 
 class AudioEncoder(nn.Module):
     def __init__(self, sample_rate: int, n_mels: int, conv_channels: List[int], dropout: float):
@@ -631,9 +633,13 @@ class MultimodalTurnTakingModel(nn.Module):
         self.use_vap_feat = bool(vf_cfg.get("enabled", False))
         if self.use_vap_feat:
             self.vap_feat_dim = int(vf_cfg.get("feat_dim", 18))
+            self.vap_window = int(vf_cfg.get("window", 20))
             _h = self.fusion.out_dim
-            self.vap_feat_proj = nn.Sequential(
-                nn.Linear(self.vap_feat_dim, _h), nn.LayerNorm(_h), nn.GELU(),
+            self.vap_feat_encoder = VapWindowEncoder(
+                feat_dim=self.vap_feat_dim,
+                hidden=_h,
+                conv_channels=int(vf_cfg.get("conv_channels", 64)),
+                dropout=float(cfg.get("fusion", {}).get("dropout", 0.0)),
             )
             self.vap_feat_merge = nn.Sequential(
                 nn.Linear(_h * 2, _h), nn.LayerNorm(_h), nn.GELU(),
@@ -655,8 +661,11 @@ class MultimodalTurnTakingModel(nn.Module):
         fused = self.fusion(audio_feat, text_feat, context_feat, hand_feat)
         if getattr(self, "use_vap_feat", False):
             if vap_feat is None:
-                vap_feat = fused.new_zeros(fused.shape[0], self.vap_feat_dim)
-            v = self.vap_feat_proj(vap_feat.to(fused.dtype))
+                vap_feat = fused.new_zeros(fused.shape[0], self.vap_window, self.vap_feat_dim)
+            elif vap_feat.dim() == 2:
+                # 兼容旧单帧 [B, feat_dim] 输入：升一维成 [B, 1, feat_dim]
+                vap_feat = vap_feat.unsqueeze(1)
+            v = self.vap_feat_encoder(vap_feat.to(fused.dtype))
             fused = self.vap_feat_merge(torch.cat([fused, v], dim=-1))
         logits = self.head(fused)
         if self.num_targets == 1:
