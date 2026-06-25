@@ -1,0 +1,53 @@
+# v2 (ensemble + 真 VAP) 专用 ignore，会覆盖根目录 .dockerignore。
+# 与 v1 唯一区别：MaAI/ 不再排除（v2 需要 MaAI 源码做 VAP 预计算）。
+
+train/
+test/
+test_data/
+outputs/
+.cache/
+.git/
+.github/
+.idea/
+
+# Python 缓存
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.env/
+
+# 文档（镜像内只保留 SUBMIT_README.md -> README.md）
+README.md
+赛题介绍.md
+结果评估说明.txt
+*.ipynb
+
+# 备用脚本
+scripts/run_train*.sh
+scripts/run_infer*.sh
+scripts/stage_submission*.ps1
+scripts/download_vap_weight.ps1
+
+# 其它实验 config
+configs/whisper_qwen0_6b_lmf_*.yaml
+# 旧的单模型提交 config 也不需要送进 v2 上下文
+configs/submit_single_vapfeat.yaml
+
+# 旧的单模型入口
+run.sh
+Dockerfile
+.dockerignore
+
+# MaAI 的本地 git/site 元数据，保留代码本体
+MaAI/.git/
+MaAI/.github/
+MaAI/site/
+MaAI/img/
+MaAI/docs/
+MaAI/readme/
+MaAI/example/
+MaAI/train/
+MaAI/*.md
