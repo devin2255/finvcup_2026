@@ -56,6 +56,13 @@ audio_encoder:
   freeze: true
   unfreeze_layers: 2
   tail_ratio: 0.25
+  # dualch: 双声道活动分支（必须与训练一致，否则 stereo 参数加载不上 -> 架构不匹配）
+  stereo_branch:
+    enabled: true
+    n_mels: 64
+    conv_channels: [32, 64, 96]
+    tail_sec: 6.0
+    dropout: 0.1
 
 text_encoder:
   model_name: /app/models/Qwen3-0.6B
