@@ -1,16 +1,19 @@
 # ============================================================
-# 准备 dualch v2 镜像构建上下文（ensemble + 真单帧 VAP，双声道音频变体）。
+# Stage build context for dualch v2 image (ensemble + real single-frame VAP,
+# dual-channel audio variant).
 #
-# 与 stage_submission_ensemble.ps1 的区别：checkpoint/manifest 来自
-# outputs\lmf_dualch（双声道 stereo 分支模型）。骨干权重(whisper/Qwen)、CPC、
-# VAP 权重已在 models\ 下，本脚本只校验存在性 + 刷新 ckpt\。
+# Difference vs stage_submission_ensemble.ps1: checkpoints/manifest come from
+# outputs\lmf_dualch (the stereo-branch model). Backbones (whisper/Qwen), CPC
+# and VAP weights already live under models\; this script only verifies them
+# and refreshes ckpt\.
 #
-# 重要：构建必须在 feat/dualch-audio 分支（src\ 含 StereoActivityEncoder +
-# DualChannelAudioEncoder），且 configs\submit_ensemble_vap.yaml 已开
-# audio_encoder.stereo_branch.enabled=true（与训练一致），否则 stereo 参数加载不上。
-# dualch 用单帧 VAP（不是 window），precompute 走基线逻辑。
+# IMPORTANT: build MUST be on branch feat/dualch-audio (src\ has
+# StereoActivityEncoder + DualChannelAudioEncoder), and
+# configs\submit_ensemble_vap.yaml must have audio_encoder.stereo_branch.enabled
+# = true (matching training) or the stereo params will fail to load.
+# dualch uses single-frame VAP (NOT window); precompute stays baseline.
 #
-# 用法（仓库根目录，且已 git checkout feat/dualch-audio）：
+# Usage (repo root, after: git checkout feat/dualch-audio):
 #   powershell -File scripts\stage_submission_dualch.ps1
 # ============================================================
 $ErrorActionPreference = "Stop"
@@ -40,7 +43,7 @@ foreach ($name in @("ensemble_ep3.pt","ensemble_ep4.pt","ensemble_ep5.pt","ensem
   $s = Join-Path $CkptSrcDir $name
   $d = Join-Path $CkptDst $name
   if (-not (Test-Path $s)) { Write-Host "  [ERR] missing checkpoint: $s" -ForegroundColor Red; exit 1 }
-  Copy-Item $s $d -Force; Write-Host "  [ok] $name"   # 覆盖旧成员（vapfeat/vapwin）
+  Copy-Item $s $d -Force; Write-Host "  [ok] $name"   # overwrite old members (vapfeat/vapwin)
 }
 if (-not (Test-Path $ManifestSrc)) { Write-Host "  [ERR] missing manifest: $ManifestSrc" -ForegroundColor Red; exit 1 }
 Copy-Item $ManifestSrc (Join-Path $CkptDst "ensemble_manifest.json") -Force
@@ -56,5 +59,5 @@ Write-Host "==> sizes:"
   }
 }
 Write-Host ""
-Write-Host "确认：git branch 必须是 feat/dualch-audio；submit_ensemble_vap.yaml 已开 stereo_branch。"
-Write-Host "下一步: docker build -f Dockerfile.ensemble_vap -t finvcup-infer:dualch ."
+Write-Host "Confirm: git branch must be feat/dualch-audio; submit_ensemble_vap.yaml has stereo_branch enabled."
+Write-Host "Next: docker build -f Dockerfile.ensemble_vap -t finvcup-infer:dualch ."
