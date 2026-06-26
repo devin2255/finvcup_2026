@@ -14,6 +14,7 @@ Qwen2.5-Omni-3B 原生训练入口（4 卡 DDP）。
 """
 
 import argparse
+import logging
 import math
 import sys
 from pathlib import Path
@@ -49,6 +50,21 @@ from src.utils import (
     set_seed,
     setup_distributed,
 )
+
+
+class _DropOmniSysPromptWarning(logging.Filter):
+    """丢掉 Omni processor 的 "System prompt modified, audio output may not work" 噪声警告。
+
+    我们 enable_audio_output=False、不生成语音，只取 thinker hidden state，该警告无害；
+    但它每个样本刷一条，长训会把日志撑爆，故精准过滤（不影响其它警告）。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "System prompt modified" not in record.getMessage()
+
+
+def _silence_omni_sysprompt_warning():
+    logging.getLogger().addFilter(_DropOmniSysPromptWarning())
 
 
 def parse_args():
@@ -133,6 +149,7 @@ def _build_criterion(cfg, train_samples, multi_targets, device):
 
 def main():
     args = parse_args()
+    _silence_omni_sysprompt_warning()
     cfg = load_config(args.config)
     set_env_paths(cfg)
     ensure_dirs(cfg)
@@ -283,7 +300,10 @@ def main():
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         optimizer.zero_grad(set_to_none=True)
-        iterator = tqdm(train_loader, desc=f"train ep{epoch}", leave=False) if is_main else train_loader
+        iterator = (
+            tqdm(train_loader, desc=f"train ep{epoch}", total=steps_per_epoch, leave=False)
+            if is_main else train_loader
+        )
 
         epoch_loss_sum, epoch_steps = 0.0, 0
         for step, batch in enumerate(iterator):
