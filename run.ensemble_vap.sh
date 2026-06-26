@@ -42,6 +42,7 @@ echo "[run] === Stage A: VAP precompute ==="
   --test_root "${TEST_ROOT}" \
   --out_dir "${VAP_CACHE}" \
   --sample_rate 16000 \
+  --window "${VAP_WINDOW:-20}" \
   --workers "${VAP_WORKERS:-4}"
 
 t1=$(date +%s)
