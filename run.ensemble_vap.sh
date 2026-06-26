@@ -34,7 +34,7 @@ t0=$(date +%s)
 # （VAP/CPC 是小模型，单进程 GPU 利用率低 -> 加进程近线性提速）。默认 8。
 # 评测机直接 bash run.sh（注入不了 env），靠此内置默认；本地 smoke 可 -e VAP_WORKERS 覆盖。
 # 注：dualch 用单帧 VAP（每段输出 (18,)），不传 --window。
-echo "[run] === Stage A: VAP precompute (workers=${VAP_WORKERS:-8}) ==="
+echo "[run] === Stage A: VAP precompute (workers=${VAP_WORKERS:-12}) ==="
 /opt/maai-env/bin/python -m src.precompute_vap_test \
   --maai_dir "${MAAI_DIR}" \
   --lang ch_kyoto --mode vap_mc \
@@ -44,7 +44,7 @@ echo "[run] === Stage A: VAP precompute (workers=${VAP_WORKERS:-8}) ==="
   --test_root "${TEST_ROOT}" \
   --out_dir "${VAP_CACHE}" \
   --sample_rate 16000 \
-  --workers "${VAP_WORKERS:-8}"
+  --workers "${VAP_WORKERS:-12}"
 
 t1=$(date +%s)
 echo "[run] stage A done in $((t1 - t0))s"
