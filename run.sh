@@ -30,7 +30,11 @@ fi
 
 mkdir -p "$(dirname "${OUT_CSV}")"
 
-EXTRA=()
+# 集成方式：默认 soft（概率平均软投票，统一用 best pt 阈值）。
+#   VOTE=hard 切回逐标签多数硬投票。
+VOTE="${VOTE:-soft}"
+
+EXTRA=(--vote "${VOTE}")
 # 可选环境变量覆盖：
 #   TOPK=3         只用 manifest 前 K 个成员
 #   BATCH_SIZE=32  覆盖推理批大小（显存不足时调小）

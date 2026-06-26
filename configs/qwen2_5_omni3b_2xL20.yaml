@@ -1,0 +1,118 @@
+# ============================================================
+# Qwen2.5-Omni-3B 原生方案 —— 2×L20(48G) 双卡 DDP。
+# 与 4xL20 版唯一区别：把"有效批/每 epoch 优化步数"对齐到 4 卡那版，方便横向比分。
+#   有效批 = batch_size(每卡4) × 2卡 × grad_accum(16) = 128（与 4xL20 相同）
+#   每 epoch 优化步数 = max_steps_per_epoch(800) / grad_accum(16) = 50（与 4xL20 相同）
+#   每卡显存预算不变（batch_size=4 不动），只是 2 卡每 epoch 步数翻倍 → 墙钟约 2x。
+# 结构/超参/标签口径全部与 4xL20 版一致。
+# ============================================================
+
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8
+
+data_augmentation:
+  dynamic_context: true
+  min_context_chunks: 125
+  max_context_chunks: 375
+  context_prob: 0.5
+
+paths:
+  project_root: /mnt/workspace/dorihue/finvcup_2026
+  train_audio_dir: /mnt/workspace/dorihue/finvcup_2026/train/audio
+  train_text_dir: /mnt/workspace/dorihue/finvcup_2026/train/text
+  train_labels_dir: /mnt/workspace/dorihue/finvcup_2026/train/labels
+
+  output_root: /mnt/workspace/dorihue/finvcup_2026/outputs/omni3b_2xL20
+  checkpoints_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/omni3b_2xL20/checkpoints
+  logs_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/omni3b_2xL20/logs
+
+  cache_root: /mnt/workspace/dorihue/finvcup_2026/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+omni:
+  # ⚠️ 核对这台服务器上 Omni-3B 的真实文件夹名（通常 Qwen2.5-Omni-3B）。
+  model_path: /mnt/workspace/dorihue/modelscope/Qwen2.5-Omni-3B
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  enable_audio_output: false
+  gradient_checkpointing: true
+  audio_mono: true
+  pooling: masked_mean
+  max_text_tokens: 512
+
+history:
+  include: true
+  history_chunks: 125
+  encoding: rle
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  restrict_to_language_model: true
+
+head:
+  hidden_dim: 512
+  dropout: 0.2
+
+train:
+  multi_label: true
+  pos_weight_mode: capped_per_label
+  pos_weight_cap: 8.0
+  focal_gamma: 2.0
+  label_smoothing: 0.05
+
+  epochs: 20
+  max_steps_per_epoch: 800          # 4xL20 版是 400；2 卡翻倍以保持每 epoch 样本量/更新数一致
+  eval_valid_sample_count: 6000
+  eval_valid_max_batches: null
+  eval_valid_shuffle: false
+
+  # 有效批 = 4(每卡) × 2(卡) × 16(accum) = 128，与 4xL20 版相同
+  batch_size: 4
+  eval_batch_size: 8
+  log_every_steps: 20
+  gradient_accumulation_steps: 16   # 4xL20 版是 8；2 卡加倍以补回少掉的两张卡
+
+  learning_rate: 1.0e-4
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  ema_decay: 0.999
+  grad_clip_norm: 1.0
+  use_amp: true
+  amp_dtype: bfloat16
+  use_ema: true
+
+  save_metric: best_f1
+  best_checkpoint_name: best_omni3b.pt
+  early_stop_patience: 8
+
+  ensemble_topk: 5
+
+env:
+  HF_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
+  TRANSFORMERS_CACHE: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
+  TORCH_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TOKENIZERS_PARALLELISM: "false"

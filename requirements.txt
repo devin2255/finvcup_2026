@@ -6,4 +6,6 @@ tqdm
 torch
 torchaudio
 transformers<5
+peft>=0.11
+accelerate>=0.30
 tensorboard

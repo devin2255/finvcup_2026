@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # ==========================================================
-# 集成推理：用 ensemble_manifest.json 里的多个模型逐标签多数投票
-# （每个模型用自己的最优阈值）。
+# 集成推理：用 ensemble_manifest.json 里的多个模型集成。
+# 默认 soft（概率平均软投票，统一用 best pt 阈值）；VOTE=hard 切回多数硬投票。
 # 使用方法:
 #   bash scripts/run_infer_ensemble.sh <test_root> <output_pred_csv> [config_path] [topk]
+#   VOTE=hard bash scripts/run_infer_ensemble.sh ...   # 切回硬投票
 # ==========================================================
 
 if [[ $# -lt 2 ]]; then
@@ -38,4 +39,5 @@ python3 -m src.infer_ensemble \
   --config "${CONFIG_PATH}" \
   --test_root "${TEST_ROOT}" \
   --output_csv "${OUT_CSV}" \
+  --vote "${VOTE:-soft}" \
   "${EXTRA[@]}"
