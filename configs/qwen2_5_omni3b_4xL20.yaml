@@ -90,19 +90,19 @@ train:
   focal_gamma: 2.0
   label_smoothing: 0.05
 
-  epochs: 20
+  epochs: 30                            # 充分训练：早停(patience)兜底，跑不满会自动停
   max_steps_per_epoch: 400              # 单步比 whisper 方案重，限制每 epoch 步数控制时长
   eval_valid_sample_count: 6000         # 3B 评估慢，验证取样少些（rank0 评估）
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  # 有效批 = batch_size(每卡4) × 4卡 × grad_accum(8) = 128
-  batch_size: 4
-  eval_batch_size: 8
+  # 有效批 = batch_size(每卡16) × 4卡 × grad_accum(8) = 512（显存够，每卡 batch 提到 16）
+  batch_size: 16
+  eval_batch_size: 32
   log_every_steps: 20
   gradient_accumulation_steps: 8
 
-  learning_rate: 1.0e-4                 # LoRA + 头 的学习率
+  learning_rate: 2.0e-4                 # LoRA + 头 的学习率（有效批 128→512，按 √4=2x 上调）
   warmup_ratio: 0.03
   weight_decay: 0.0
   ema_decay: 0.999
@@ -113,7 +113,7 @@ train:
 
   save_metric: best_f1                  # = macro_best_f1（与 whisper 方案同口径）
   best_checkpoint_name: best_omni3b.pt
-  early_stop_patience: 8
+  early_stop_patience: 10
 
   ensemble_topk: 5
 
