@@ -597,6 +597,7 @@ class MultimodalTurnTakingModel(nn.Module):
                     conv_channels=tuple(sb_cfg.get("conv_channels", [32, 64, 96])),
                     tail_sec=float(sb_cfg.get("tail_sec", 6.0)),
                     dropout=float(sb_cfg.get("dropout", 0.1)),
+                    time_pool=str(sb_cfg.get("time_pool", "avg")),
                 )
                 self.audio_encoder = DualChannelAudioEncoder(whisper_enc, stereo_enc)
             else:

@@ -20,6 +20,7 @@ from src.data import (
     split_conversation_ids,
 )
 from src.models import MultimodalTurnTakingModel
+from src.pos_weight import compute_pos_weight
 from src.utils import (
     cleanup_distributed,
     compute_multilabel_metrics,
@@ -370,12 +371,13 @@ def main():
 
     if cfg["train"].get("pos_weight_mode", "per_label") in ("per_label", "capped_per_label"):
         y_mat = np.asarray([s.label_vec for s in train_samples], dtype=np.float32)  # [N,5]
-        pos = y_mat.sum(axis=0)
-        neg = y_mat.shape[0] - pos
-        pw = neg / np.maximum(1.0, pos)
         if cfg["train"].get("pos_weight_mode") == "capped_per_label":
             cap = float(cfg["train"].get("pos_weight_cap", 5.0))
-            pw = np.minimum(pw, cap)
+            per_label_cap = cfg["train"].get("pos_weight_cap_per_label", None)
+        else:
+            cap = float("inf")
+            per_label_cap = None
+        pw = compute_pos_weight(y_mat, metric_label_names, cap=cap, per_label_cap=per_label_cap)
         pos_weight = torch.tensor(pw, device=device, dtype=torch.float32)
     else:
         pos_weight = torch.ones(len(multi_targets), device=device, dtype=torch.float32)
