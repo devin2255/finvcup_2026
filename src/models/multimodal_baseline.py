@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from transformers import AutoModel, WhisperFeatureExtractor, WhisperModel
 
 from src.vap_pool import VapWindowEncoder
+from src.audio_stereo import StereoActivityEncoder
 
 
 class AudioEncoder(nn.Module):
@@ -562,12 +563,26 @@ class MultimodalFusion(nn.Module):
         return self.out_proj(fused)
 
 
+class DualChannelAudioEncoder(nn.Module):
+    """Mono Whisper（语义内容）+ 轻量 stereo CNN（声道活动）拼接成 audio 模态。"""
+
+    def __init__(self, whisper: WhisperAudioEncoder, stereo: StereoActivityEncoder):
+        super().__init__()
+        self.whisper = whisper
+        self.stereo = stereo
+        self.out_dim = whisper.out_dim + stereo.out_dim
+
+    def forward(self, wave: torch.Tensor) -> torch.Tensor:
+        # 两个子编码器吃同一个 [B, 2, T]：whisper 内部自行 mono 化，stereo 用双声道。
+        return torch.cat([self.whisper(wave), self.stereo(wave)], dim=-1)
+
+
 class MultimodalTurnTakingModel(nn.Module):
     def __init__(self, cfg: Dict):
         super().__init__()
         audio_type = str(cfg["audio_encoder"].get("type", "cnn")).lower()
         if audio_type == "whisper":
-            self.audio_encoder = WhisperAudioEncoder(
+            whisper_enc = WhisperAudioEncoder(
                 model_name=cfg["audio_encoder"]["model_name"],
                 sample_rate=cfg["sample_rate"],
                 proj_dim=int(cfg["audio_encoder"]["proj_dim"]),
@@ -575,6 +590,18 @@ class MultimodalTurnTakingModel(nn.Module):
                 tail_ratio=float(cfg["audio_encoder"].get("tail_ratio", 0.2)),
                 unfreeze_layers=int(cfg["audio_encoder"].get("unfreeze_layers", 0)),
             )
+            sb_cfg = cfg["audio_encoder"].get("stereo_branch", {}) or {}
+            if bool(sb_cfg.get("enabled", False)):
+                stereo_enc = StereoActivityEncoder(
+                    sample_rate=cfg["sample_rate"],
+                    n_mels=int(sb_cfg.get("n_mels", 64)),
+                    conv_channels=tuple(sb_cfg.get("conv_channels", [32, 64, 96])),
+                    tail_sec=float(sb_cfg.get("tail_sec", 6.0)),
+                    dropout=float(sb_cfg.get("dropout", 0.1)),
+                )
+                self.audio_encoder = DualChannelAudioEncoder(whisper_enc, stereo_enc)
+            else:
+                self.audio_encoder = whisper_enc
         else:
             self.audio_encoder = AudioEncoder(
                 sample_rate=cfg["sample_rate"],
