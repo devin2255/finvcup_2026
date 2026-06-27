@@ -66,3 +66,44 @@ def test_deterministic_in_eval():
     x = torch.randn(2, 2, 24000)
     with torch.no_grad():
         assert torch.allclose(enc(x), enc(x))
+
+
+# --- BC-targeted: time_pool ---
+import pytest
+from src.audio_stereo import StereoActivityEncoder as _SAE
+
+
+def _enc_tp(time_pool):
+    return _SAE(sample_rate=16000, n_mels=32, conv_channels=(16, 32, 48),
+               tail_sec=1.0, dropout=0.0, time_pool=time_pool).eval()
+
+
+@pytest.mark.parametrize("tp,mult", [("avg", 1), ("max", 1), ("attn", 1), ("attn_max", 2)])
+def test_time_pool_out_dim(tp, mult):
+    enc = _enc_tp(tp)
+    assert enc.out_dim == 48 * mult
+    out = enc(torch.randn(2, 2, 32000))
+    assert out.shape == (2, 48 * mult)
+
+
+def test_default_time_pool_is_avg_backward_compat():
+    enc = _SAE(sample_rate=16000, n_mels=32, conv_channels=(16, 32, 48),
+              tail_sec=1.0, dropout=0.0)
+    assert enc.out_dim == 48  # unchanged default behavior
+
+
+def test_max_pool_preserves_brief_spike_more_than_avg():
+    # Seed before EACH encoder so conv weights are identical across them -> the only
+    # difference is the time-pooling op (otherwise random conv init makes this fragile).
+    # A brief tail spike must move max-based pooling more than plain avg.
+    base = torch.full((1, 2, 16000), 0.01)
+    spiked = base.clone()
+    spiked[0, 1, 8000:8400] = 3.0           # brief loud blip in ch1 (listener), ~25ms
+    diffs = {}
+    for tp in ("avg", "max", "attn_max"):
+        torch.manual_seed(0)
+        enc = _enc_tp(tp)
+        with torch.no_grad():
+            diffs[tp] = (enc(spiked) - enc(base)).abs().mean().item()
+    assert diffs["max"] > diffs["avg"] * 1.5    # max is the brief-spike detector
+    assert diffs["attn_max"] > diffs["avg"]     # attn_max contains max -> beats avg
