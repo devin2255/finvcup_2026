@@ -20,23 +20,14 @@ import numpy as np
 import torch
 
 from src.data.dataset import _read_wav_slice
+from src.vap_feature_layout import (
+    VAP_FEAT_DIM,
+    append_bc_tail_to_last_feature,
+    flat_bc_result,
+    flat_vap_result,
+)
 
-VAP_FEAT_DIM = 18
-
-
-def _flat_result(r: dict) -> list:
-    pn = [float(x) for x in r.get("p_now", [0.0, 0.0])]
-    pf = [float(x) for x in r.get("p_future", [0.0, 0.0])]
-    vd = [float(x) for x in r.get("vad", [0.0, 0.0])]
-    pb = r.get("p_bins")
-    pb_flat = []
-    if pb is not None:
-        for spk in pb:
-            pb_flat.extend(float(x) for x in spk)
-    pb_flat = (pb_flat + [0.0] * 8)[:8]
-    pbn = [float(x) for x in r.get("p_bins_now", [0.0, 0.0])]
-    pbf = [float(x) for x in r.get("p_bins_future", [0.0, 0.0])]
-    return pn + pf + vd + pb_flat + pbn + pbf
+_W_BC_MAAI = None
 
 
 def _load_seg_2ch(audio_path: Path, target_sr: int) -> np.ndarray:
@@ -68,11 +59,31 @@ def vap_last_frame_feature(maai, audio2: np.ndarray, frame_samples: int) -> np.n
             break
         maai.process(c1, c2)
         while not q.empty():
-            last_feat = _flat_result(q.get())
+            last_feat = flat_vap_result(q.get())
 
     if last_feat is None:
         return np.zeros((VAP_FEAT_DIM,), dtype=np.float32)
     return np.asarray(last_feat, dtype=np.float32)
+
+
+def bc_values_for_segment(maai, audio2: np.ndarray, frame_samples: int) -> np.ndarray:
+    """Run MaAI bc mode over a segment and return frame-level p_bc values."""
+    maai.reset_runtime_state()
+    q = maai.result_dict_queue
+    while not q.empty():
+        q.get()
+
+    T = audio2.shape[1]
+    values = []
+    for i in range(0, T, frame_samples):
+        c1 = np.ascontiguousarray(audio2[0, i:i + frame_samples])
+        c2 = np.ascontiguousarray(audio2[1, i:i + frame_samples])
+        if c1.shape[0] == 0:
+            break
+        maai.process(c1, c2)
+        while not q.empty():
+            values.append(flat_bc_result(q.get()))
+    return np.asarray(values, dtype=np.float32)
 
 
 # ============================================================
@@ -84,7 +95,7 @@ _W_CFG = None   # {frame_samples, sample_rate, audio_dir, out_dir, overwrite}
 
 def _worker_init(init_args: dict):
     """spawn 子进程的初始化：加载 MaAI 模型（每进程一份）。"""
-    global _W_MAAI, _W_CFG
+    global _W_MAAI, _W_BC_MAAI, _W_CFG
     maai_dir = Path(init_args["maai_dir"])
     for cand in (maai_dir / "src", maai_dir):
         if (cand / "maai").is_dir():
@@ -101,12 +112,26 @@ def _worker_init(init_args: dict):
         cpc_model=os.path.expanduser(init_args["cpc_model"]),
         local_model=init_args["vap_local_model"], return_p_bins=True,
     )
+    _W_BC_MAAI = None
+    if init_args["bc_enabled"]:
+        _W_BC_MAAI = Maai(
+            mode=init_args["bc_mode"], lang=init_args["bc_lang"],
+            frame_rate=init_args["frame_rate"],
+            context_len_sec=int(init_args["context_sec"]),
+            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
+            device=init_args["device"],
+            cpc_model=os.path.expanduser(init_args["cpc_model"]),
+            local_model=init_args["bc_local_model"],
+        )
     _W_CFG = {
         "frame_samples": int(round(init_args["sample_rate"] / float(init_args["frame_rate"]))),
         "sample_rate": init_args["sample_rate"],
         "audio_dir": init_args["audio_dir"],
         "out_dir": init_args["out_dir"],
         "overwrite": init_args["overwrite"],
+        "bc_enabled": bool(init_args["bc_enabled"]),
+        "bc_tail_sec": float(init_args["bc_tail_sec"]),
+        "frame_rate": float(init_args["frame_rate"]),
     }
     print(f"[worker pid={os.getpid()}] MaAI loaded, frame_samples={_W_CFG['frame_samples']}",
           flush=True)
@@ -114,13 +139,21 @@ def _worker_init(init_args: dict):
 
 def _worker_process_seg(sid: str) -> tuple[str, bool, str]:
     """单段处理：返回 (seg_id, ok, msg)。"""
-    global _W_MAAI, _W_CFG
+    global _W_MAAI, _W_BC_MAAI, _W_CFG
     out_path = Path(_W_CFG["out_dir"]) / f"{sid}.npy"
     if out_path.exists() and not _W_CFG["overwrite"]:
         return sid, True, "skip-exists"
     try:
         audio2 = _load_seg_2ch(Path(_W_CFG["audio_dir"]) / f"{sid}.wav", _W_CFG["sample_rate"])
         feat = vap_last_frame_feature(_W_MAAI, audio2, _W_CFG["frame_samples"])
+        if _W_BC_MAAI is not None:
+            bc_values = bc_values_for_segment(_W_BC_MAAI, audio2, _W_CFG["frame_samples"])
+            feat = append_bc_tail_to_last_feature(
+                feat,
+                bc_values,
+                frame_rate=_W_CFG["frame_rate"],
+                tail_sec=_W_CFG["bc_tail_sec"],
+            )
         np.save(out_path, feat)
         return sid, True, "ok"
     except Exception as e:
@@ -139,6 +172,11 @@ def main():
     ap.add_argument("--context_sec", type=float, default=20)
     ap.add_argument("--cpc_model", type=str, required=True)
     ap.add_argument("--vap_local_model", type=str, required=True)
+    ap.add_argument("--bc_enabled", action="store_true", help="append MaAI bc timing features")
+    ap.add_argument("--bc_lang", type=str, default="ch", help="MaAI bc language, e.g. ch/en/jp/tri")
+    ap.add_argument("--bc_mode", type=str, default="bc")
+    ap.add_argument("--bc_local_model", type=str, default=None)
+    ap.add_argument("--bc_tail_sec", type=float, default=2.0)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--sample_rate", type=int, default=16000)
     ap.add_argument("--test_root", type=str, required=True)
@@ -164,6 +202,8 @@ def main():
         lang=args.lang, mode=args.mode,
         frame_rate=args.frame_rate, context_sec=args.context_sec,
         cpc_model=args.cpc_model, vap_local_model=args.vap_local_model,
+        bc_enabled=bool(args.bc_enabled), bc_lang=args.bc_lang, bc_mode=args.bc_mode,
+        bc_local_model=args.bc_local_model, bc_tail_sec=args.bc_tail_sec,
         device=args.device, sample_rate=args.sample_rate,
         audio_dir=str(audio_dir), out_dir=str(out_dir),
         overwrite=bool(args.overwrite),

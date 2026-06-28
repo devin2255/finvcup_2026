@@ -32,28 +32,15 @@ import torch
 
 from src.data.dataset import _read_wav_slice, list_conv_ids
 from src.utils import load_config
-
-VAP_FEAT_DIM = 18
-FEAT_LAYOUT = ["p_now_0", "p_now_1", "p_future_0", "p_future_1", "vad_0", "vad_1",
-               "p_bins_s0_b0", "p_bins_s0_b1", "p_bins_s0_b2", "p_bins_s0_b3",
-               "p_bins_s1_b0", "p_bins_s1_b1", "p_bins_s1_b2", "p_bins_s1_b3",
-               "p_bins_now_0", "p_bins_now_1", "p_bins_future_0", "p_bins_future_1"]
-
-
-def _flat_result(r: dict) -> list:
-    """把一帧的 result dict 拍平成 18 维。缺字段用 0 兜底。"""
-    pn = [float(x) for x in r.get("p_now", [0.0, 0.0])]
-    pf = [float(x) for x in r.get("p_future", [0.0, 0.0])]
-    vd = [float(x) for x in r.get("vad", [0.0, 0.0])]
-    pb = r.get("p_bins")
-    pb_flat = []
-    if pb is not None:
-        for spk in pb:
-            pb_flat.extend(float(x) for x in spk)
-    pb_flat = (pb_flat + [0.0] * 8)[:8]
-    pbn = [float(x) for x in r.get("p_bins_now", [0.0, 0.0])]
-    pbf = [float(x) for x in r.get("p_bins_future", [0.0, 0.0])]
-    return pn + pf + vd + pb_flat + pbn + pbf
+from src.vap_feature_layout import (
+    VAP_BC_FEAT_DIM,
+    VAP_BC_FEAT_LAYOUT,
+    VAP_FEAT_DIM,
+    VAP_FEAT_LAYOUT,
+    append_bc_tail_features,
+    flat_bc_result,
+    flat_vap_result,
+)
 
 
 def _load_conv_2ch(audio_path: Path, target_sr: int) -> np.ndarray:
@@ -84,10 +71,29 @@ def vap_features_for_conv(maai, audio2: np.ndarray, frame_samples: int) -> np.nd
             break
         maai.process(c1, c2)
         while not q.empty():
-            feats.append(_flat_result(q.get()))
+            feats.append(flat_vap_result(q.get()))
     if not feats:
         return np.zeros((0, VAP_FEAT_DIM), dtype=np.float32)
     return np.asarray(feats, dtype=np.float32)
+
+
+def bc_values_for_conv(maai, audio2: np.ndarray, frame_samples: int) -> np.ndarray:
+    """Run MaAI bc mode frame by frame and return scalar p_bc values."""
+    maai.reset_runtime_state()
+    q = maai.result_dict_queue
+    while not q.empty():
+        q.get()
+    T = audio2.shape[1]
+    values = []
+    for i in range(0, T, frame_samples):
+        c1 = np.ascontiguousarray(audio2[0, i:i + frame_samples])
+        c2 = np.ascontiguousarray(audio2[1, i:i + frame_samples])
+        if c1.shape[0] == 0:
+            break
+        maai.process(c1, c2)
+        while not q.empty():
+            values.append(flat_bc_result(q.get()))
+    return np.asarray(values, dtype=np.float32)
 
 
 def main():
@@ -101,6 +107,11 @@ def main():
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--cpc_model", type=str, default="~/.cache/cpc/60k_epoch4-d0f474de.pt")
     ap.add_argument("--local_model", type=str, default=None)
+    ap.add_argument("--bc_enabled", action="store_true", help="append MaAI bc timing features to VAP rows")
+    ap.add_argument("--bc_lang", type=str, default="ch", help="MaAI bc language, e.g. ch/en/jp/tri")
+    ap.add_argument("--bc_mode", type=str, default="bc")
+    ap.add_argument("--bc_local_model", type=str, default=None)
+    ap.add_argument("--bc_tail_sec", type=float, default=2.0)
     ap.add_argument("--out_dir", type=str, required=True, help="特征缓存目录")
     ap.add_argument("--max_convs", type=int, default=None, help="只处理前 N 通（验证用）")
     ap.add_argument("--overwrite", action="store_true", help="已存在也重算")
@@ -128,16 +139,39 @@ def main():
         device=args.device, cpc_model=os.path.expanduser(args.cpc_model),
         local_model=args.local_model, return_p_bins=True,
     )
+    bc_maai = None
+    if args.bc_enabled:
+        print(
+            f"[load] Maai(mode={args.bc_mode}, lang={args.bc_lang}, "
+            f"frame_rate={args.frame_rate}, context_len_sec={args.context_sec})"
+        )
+        bc_maai = Maai(
+            mode=args.bc_mode, lang=args.bc_lang, frame_rate=args.frame_rate,
+            context_len_sec=int(args.context_sec),
+            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
+            device=args.device, cpc_model=os.path.expanduser(args.cpc_model),
+            local_model=args.bc_local_model,
+        )
     frame_samples = int(round(sample_rate / float(args.frame_rate)))
-    print(f"[info] frame_samples={frame_samples} (={1000/args.frame_rate:.0f}ms/帧), feat_dim={VAP_FEAT_DIM}")
+    feat_dim = VAP_BC_FEAT_DIM if args.bc_enabled else VAP_FEAT_DIM
+    feat_layout = VAP_BC_FEAT_LAYOUT if args.bc_enabled else VAP_FEAT_LAYOUT
+    print(f"[info] frame_samples={frame_samples} (={1000/args.frame_rate:.0f}ms/帧), feat_dim={feat_dim}")
+
+    if args.bc_enabled:
+        print(
+            f"[info] BC append enabled: bc_lang={args.bc_lang}, "
+            f"tail_sec={args.bc_tail_sec}, final_feat_dim={feat_dim}"
+        )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     # meta：供训练/推理侧做 end_idx -> vap_frame 映射
     meta = {
         "frame_rate": float(args.frame_rate), "chunk_ms": chunk_ms, "sample_rate": sample_rate,
-        "feat_dim": VAP_FEAT_DIM, "feat_layout": FEAT_LAYOUT,
+        "feat_dim": feat_dim, "feat_layout": feat_layout,
         "lang": args.lang, "mode": args.mode, "context_sec": float(args.context_sec),
+        "bc_enabled": bool(args.bc_enabled), "bc_lang": args.bc_lang,
+        "bc_mode": args.bc_mode, "bc_tail_sec": float(args.bc_tail_sec),
         "frame_index_formula": "vap_frame = round(end_idx * chunk_ms * frame_rate / 1000)",
     }
     (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -160,6 +194,14 @@ def main():
         try:
             audio2 = _load_conv_2ch(wav, sample_rate)
             feats = vap_features_for_conv(maai, audio2, frame_samples)
+            if bc_maai is not None:
+                bc_values = bc_values_for_conv(bc_maai, audio2, frame_samples)
+                feats = append_bc_tail_features(
+                    feats,
+                    bc_values,
+                    frame_rate=args.frame_rate,
+                    tail_sec=args.bc_tail_sec,
+                )
             np.save(out_path, feats)
             done += 1
             if done <= 3 or done % 50 == 0:
