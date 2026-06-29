@@ -96,6 +96,39 @@ def bc_values_for_conv(maai, audio2: np.ndarray, frame_samples: int) -> np.ndarr
     return np.asarray(values, dtype=np.float32)
 
 
+def vap_bc_features_for_conv(maai_multi, audio2: np.ndarray, frame_samples: int, frame_rate: float, tail_sec: float) -> np.ndarray:
+    """Run shared-encoder MaaiMultiple once and return [F, 21] VAP+BC features."""
+    maai_multi.reset_runtime_state()
+    q = maai_multi.result_dict_queue
+    while not q.empty():
+        q.get()
+    T = audio2.shape[1]
+    vap_feats = []
+    bc_values = []
+    for i in range(0, T, frame_samples):
+        c1 = np.ascontiguousarray(audio2[0, i:i + frame_samples])
+        c2 = np.ascontiguousarray(audio2[1, i:i + frame_samples])
+        if c1.shape[0] == 0:
+            break
+        maai_multi.process(c1, c2)
+        while not q.empty():
+            result = q.get()
+            vap_result = result.get("vap") or result.get("vap_mc")
+            bc_result = result.get("bc")
+            if vap_result is None:
+                continue
+            vap_feats.append(flat_vap_result(vap_result))
+            bc_values.append(flat_bc_result(bc_result or {}))
+    if not vap_feats:
+        return np.zeros((0, VAP_BC_FEAT_DIM), dtype=np.float32)
+    return append_bc_tail_features(
+        np.asarray(vap_feats, dtype=np.float32),
+        np.asarray(bc_values, dtype=np.float32),
+        frame_rate=frame_rate,
+        tail_sec=tail_sec,
+    )
+
+
 def main():
     ap = argparse.ArgumentParser(description="预计算 VAP 逐帧话轮先验特征并缓存")
     ap.add_argument("--config", type=str, required=True, help="取 paths/sample_rate/chunk_ms")
@@ -130,17 +163,53 @@ def main():
             break
     import os
     from maai import Maai, MaaiInput
+    try:
+        from maai import MaaiMultiple
+    except ImportError:
+        MaaiMultiple = None
 
-    print(f"[load] Maai(mode={args.mode}, lang={args.lang}, frame_rate={args.frame_rate}, context_len_sec={args.context_sec})")
-    maai = Maai(
-        mode=args.mode, lang=args.lang, frame_rate=args.frame_rate,
-        context_len_sec=int(args.context_sec),
-        audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
-        device=args.device, cpc_model=os.path.expanduser(args.cpc_model),
-        local_model=args.local_model, return_p_bins=True,
-    )
+    maai = None
     bc_maai = None
-    if args.bc_enabled:
+    maai_multi = None
+    if args.bc_enabled and MaaiMultiple is not None:
+        print(
+            f"[load] MaaiMultiple([{args.mode}:{args.lang}, {args.bc_mode}:{args.bc_lang}], "
+            f"frame_rate={args.frame_rate}, context_len_sec={args.context_sec})"
+        )
+        maai_multi = MaaiMultiple(
+            configs=[
+                {
+                    "mode": args.mode,
+                    "lang": args.lang,
+                    "label": "vap",
+                    "local_model": args.local_model,
+                    "return_p_bins": True,
+                },
+                {
+                    "mode": args.bc_mode,
+                    "lang": args.bc_lang,
+                    "label": "bc",
+                    "local_model": args.bc_local_model,
+                },
+            ],
+            frame_rate=args.frame_rate,
+            context_len_sec=int(args.context_sec),
+            audio_ch1=MaaiInput.Zero(),
+            audio_ch2=MaaiInput.Zero(),
+            device=args.device,
+            cpc_model=os.path.expanduser(args.cpc_model),
+        )
+        print("[info] shared MaAI encoder enabled for VAP+BC precompute")
+    else:
+        print(f"[load] Maai(mode={args.mode}, lang={args.lang}, frame_rate={args.frame_rate}, context_len_sec={args.context_sec})")
+        maai = Maai(
+            mode=args.mode, lang=args.lang, frame_rate=args.frame_rate,
+            context_len_sec=int(args.context_sec),
+            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
+            device=args.device, cpc_model=os.path.expanduser(args.cpc_model),
+            local_model=args.local_model, return_p_bins=True,
+        )
+    if args.bc_enabled and maai_multi is None:
         print(
             f"[load] Maai(mode={args.bc_mode}, lang={args.bc_lang}, "
             f"frame_rate={args.frame_rate}, context_len_sec={args.context_sec})"
@@ -193,7 +262,16 @@ def main():
             continue
         try:
             audio2 = _load_conv_2ch(wav, sample_rate)
-            feats = vap_features_for_conv(maai, audio2, frame_samples)
+            if maai_multi is not None:
+                feats = vap_bc_features_for_conv(
+                    maai_multi,
+                    audio2,
+                    frame_samples,
+                    frame_rate=args.frame_rate,
+                    tail_sec=args.bc_tail_sec,
+                )
+            else:
+                feats = vap_features_for_conv(maai, audio2, frame_samples)
             if bc_maai is not None:
                 bc_values = bc_values_for_conv(bc_maai, audio2, frame_samples)
                 feats = append_bc_tail_features(
