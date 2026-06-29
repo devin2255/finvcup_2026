@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
+import os
 import sys
 import time
 from pathlib import Path
@@ -129,6 +131,124 @@ def vap_bc_features_for_conv(maai_multi, audio2: np.ndarray, frame_samples: int,
     )
 
 
+def _add_maai_to_path(maai_dir: str):
+    maai_path = Path(maai_dir).resolve()
+    for cand in (maai_path / "src", maai_path):
+        if (cand / "maai").is_dir():
+            cand_s = str(cand)
+            if cand_s not in sys.path:
+                sys.path.insert(0, cand_s)
+            break
+
+
+def _build_runners(init_args: dict):
+    _add_maai_to_path(init_args["maai_dir"])
+    from maai import Maai, MaaiInput
+    try:
+        from maai import MaaiMultiple
+    except ImportError:
+        MaaiMultiple = None
+
+    maai = None
+    bc_maai = None
+    maai_multi = None
+    if init_args["bc_enabled"] and MaaiMultiple is not None:
+        maai_multi = MaaiMultiple(
+            configs=[
+                {
+                    "mode": init_args["mode"],
+                    "lang": init_args["lang"],
+                    "label": "vap",
+                    "local_model": init_args["local_model"],
+                    "return_p_bins": True,
+                },
+                {
+                    "mode": init_args["bc_mode"],
+                    "lang": init_args["bc_lang"],
+                    "label": "bc",
+                    "local_model": init_args["bc_local_model"],
+                },
+            ],
+            frame_rate=init_args["frame_rate"],
+            context_len_sec=int(init_args["context_sec"]),
+            audio_ch1=MaaiInput.Zero(),
+            audio_ch2=MaaiInput.Zero(),
+            device=init_args["device"],
+            cpc_model=os.path.expanduser(init_args["cpc_model"]),
+        )
+    else:
+        maai = Maai(
+            mode=init_args["mode"], lang=init_args["lang"],
+            frame_rate=init_args["frame_rate"],
+            context_len_sec=int(init_args["context_sec"]),
+            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
+            device=init_args["device"], cpc_model=os.path.expanduser(init_args["cpc_model"]),
+            local_model=init_args["local_model"], return_p_bins=True,
+        )
+    if init_args["bc_enabled"] and maai_multi is None:
+        bc_maai = Maai(
+            mode=init_args["bc_mode"], lang=init_args["bc_lang"],
+            frame_rate=init_args["frame_rate"],
+            context_len_sec=int(init_args["context_sec"]),
+            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
+            device=init_args["device"], cpc_model=os.path.expanduser(init_args["cpc_model"]),
+            local_model=init_args["bc_local_model"],
+        )
+    return maai, bc_maai, maai_multi
+
+
+_W_MAAI = None
+_W_BC_MAAI = None
+_W_MAAI_MULTI = None
+_W_CFG = None
+
+
+def _worker_init(init_args: dict):
+    global _W_MAAI, _W_BC_MAAI, _W_MAAI_MULTI, _W_CFG
+    _W_MAAI, _W_BC_MAAI, _W_MAAI_MULTI = _build_runners(init_args)
+    _W_CFG = init_args
+    mode_msg = "MaaiMultiple" if _W_MAAI_MULTI is not None else "Maai"
+    print(
+        f"[worker pid={os.getpid()}] loaded {mode_msg}, "
+        f"frame_samples={init_args['frame_samples']}",
+        flush=True,
+    )
+
+
+def _worker_process_conv(conv: str) -> tuple[str, bool, str, tuple[int, ...] | None, float]:
+    global _W_MAAI, _W_BC_MAAI, _W_MAAI_MULTI, _W_CFG
+    out_path = Path(_W_CFG["out_dir"]) / f"{conv}.npy"
+    if out_path.exists() and not _W_CFG["overwrite"]:
+        return conv, True, "skip-exists", None, 0.0
+    wav = Path(_W_CFG["audio_dir"]) / f"{conv}.wav"
+    if not wav.exists():
+        return conv, True, f"skip-missing-audio:{wav}", None, 0.0
+    try:
+        audio2 = _load_conv_2ch(wav, int(_W_CFG["sample_rate"]))
+        if _W_MAAI_MULTI is not None:
+            feats = vap_bc_features_for_conv(
+                _W_MAAI_MULTI,
+                audio2,
+                int(_W_CFG["frame_samples"]),
+                frame_rate=float(_W_CFG["frame_rate"]),
+                tail_sec=float(_W_CFG["bc_tail_sec"]),
+            )
+        else:
+            feats = vap_features_for_conv(_W_MAAI, audio2, int(_W_CFG["frame_samples"]))
+        if _W_BC_MAAI is not None:
+            bc_values = bc_values_for_conv(_W_BC_MAAI, audio2, int(_W_CFG["frame_samples"]))
+            feats = append_bc_tail_features(
+                feats,
+                bc_values,
+                frame_rate=float(_W_CFG["frame_rate"]),
+                tail_sec=float(_W_CFG["bc_tail_sec"]),
+            )
+        np.save(out_path, feats)
+        return conv, True, "ok", tuple(feats.shape), float(audio2.shape[1] / int(_W_CFG["sample_rate"]))
+    except Exception as exc:
+        return conv, False, repr(exc), None, 0.0
+
+
 def main():
     ap = argparse.ArgumentParser(description="预计算 VAP 逐帧话轮先验特征并缓存")
     ap.add_argument("--config", type=str, required=True, help="取 paths/sample_rate/chunk_ms")
@@ -148,6 +268,7 @@ def main():
     ap.add_argument("--out_dir", type=str, required=True, help="特征缓存目录")
     ap.add_argument("--max_convs", type=int, default=None, help="只处理前 N 通（验证用）")
     ap.add_argument("--overwrite", action="store_true", help="已存在也重算")
+    ap.add_argument("--workers", type=int, default=1, help="parallel conversation workers; 96G GPU can usually try 3-4")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -156,72 +277,41 @@ def main():
     audio_dir = Path(cfg["paths"]["train_audio_dir"])
     labels_dir = Path(cfg["paths"]["train_labels_dir"])
 
-    maai_dir = Path(args.maai_dir).resolve()
-    for cand in (maai_dir / "src", maai_dir):
-        if (cand / "maai").is_dir():
-            sys.path.insert(0, str(cand))
-            break
-    import os
-    from maai import Maai, MaaiInput
-    try:
-        from maai import MaaiMultiple
-    except ImportError:
-        MaaiMultiple = None
-
     maai = None
     bc_maai = None
     maai_multi = None
-    if args.bc_enabled and MaaiMultiple is not None:
-        print(
-            f"[load] MaaiMultiple([{args.mode}:{args.lang}, {args.bc_mode}:{args.bc_lang}], "
-            f"frame_rate={args.frame_rate}, context_len_sec={args.context_sec})"
-        )
-        maai_multi = MaaiMultiple(
-            configs=[
-                {
-                    "mode": args.mode,
-                    "lang": args.lang,
-                    "label": "vap",
-                    "local_model": args.local_model,
-                    "return_p_bins": True,
-                },
-                {
-                    "mode": args.bc_mode,
-                    "lang": args.bc_lang,
-                    "label": "bc",
-                    "local_model": args.bc_local_model,
-                },
-            ],
-            frame_rate=args.frame_rate,
-            context_len_sec=int(args.context_sec),
-            audio_ch1=MaaiInput.Zero(),
-            audio_ch2=MaaiInput.Zero(),
-            device=args.device,
-            cpc_model=os.path.expanduser(args.cpc_model),
-        )
-        print("[info] shared MaAI encoder enabled for VAP+BC precompute")
-    else:
-        print(f"[load] Maai(mode={args.mode}, lang={args.lang}, frame_rate={args.frame_rate}, context_len_sec={args.context_sec})")
-        maai = Maai(
-            mode=args.mode, lang=args.lang, frame_rate=args.frame_rate,
-            context_len_sec=int(args.context_sec),
-            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
-            device=args.device, cpc_model=os.path.expanduser(args.cpc_model),
-            local_model=args.local_model, return_p_bins=True,
-        )
-    if args.bc_enabled and maai_multi is None:
-        print(
-            f"[load] Maai(mode={args.bc_mode}, lang={args.bc_lang}, "
-            f"frame_rate={args.frame_rate}, context_len_sec={args.context_sec})"
-        )
-        bc_maai = Maai(
-            mode=args.bc_mode, lang=args.bc_lang, frame_rate=args.frame_rate,
-            context_len_sec=int(args.context_sec),
-            audio_ch1=MaaiInput.Zero(), audio_ch2=MaaiInput.Zero(),
-            device=args.device, cpc_model=os.path.expanduser(args.cpc_model),
-            local_model=args.bc_local_model,
-        )
     frame_samples = int(round(sample_rate / float(args.frame_rate)))
+    init_args = dict(
+        maai_dir=str(Path(args.maai_dir).resolve()),
+        lang=args.lang,
+        mode=args.mode,
+        frame_rate=float(args.frame_rate),
+        context_sec=float(args.context_sec),
+        device=args.device,
+        cpc_model=args.cpc_model,
+        local_model=args.local_model,
+        bc_enabled=bool(args.bc_enabled),
+        bc_lang=args.bc_lang,
+        bc_mode=args.bc_mode,
+        bc_local_model=args.bc_local_model,
+        bc_tail_sec=float(args.bc_tail_sec),
+        sample_rate=sample_rate,
+        frame_samples=frame_samples,
+        audio_dir=str(audio_dir),
+        out_dir=str(args.out_dir),
+        overwrite=bool(args.overwrite),
+    )
+    if args.workers <= 1:
+        if args.bc_enabled:
+            print(
+                f"[load] MaaiMultiple([{args.mode}:{args.lang}, {args.bc_mode}:{args.bc_lang}], "
+                f"frame_rate={args.frame_rate}, context_len_sec={args.context_sec})"
+            )
+        else:
+            print(f"[load] Maai(mode={args.mode}, lang={args.lang}, frame_rate={args.frame_rate}, context_len_sec={args.context_sec})")
+        maai, bc_maai, maai_multi = _build_runners(init_args)
+        if maai_multi is not None:
+            print("[info] shared MaAI encoder enabled for VAP+BC precompute")
     feat_dim = VAP_BC_FEAT_DIM if args.bc_enabled else VAP_FEAT_DIM
     feat_layout = VAP_BC_FEAT_LAYOUT if args.bc_enabled else VAP_FEAT_LAYOUT
     print(f"[info] frame_samples={frame_samples} (={1000/args.frame_rate:.0f}ms/帧), feat_dim={feat_dim}")
@@ -251,6 +341,37 @@ def main():
     print(f"[run] {len(conv_ids)} 通对话 -> {out_dir}")
 
     t0 = time.time()
+    if args.workers > 1:
+        print(f"[parallel] workers={args.workers}; omit --overwrite to resume and skip existing caches", flush=True)
+        ctx = mp.get_context("spawn")
+        done = ok = wrote = skipped = 0
+        with ctx.Pool(processes=int(args.workers), initializer=_worker_init, initargs=(init_args,)) as pool:
+            for conv, success, msg, shape, dur in pool.imap_unordered(_worker_process_conv, conv_ids, chunksize=1):
+                done += 1
+                if success:
+                    ok += 1
+                    if msg == "ok":
+                        wrote += 1
+                    elif msg == "skip-exists":
+                        skipped += 1
+                else:
+                    print(f"  [ERR] {conv}: {msg}", flush=True)
+                if done <= 5 or done % 10 == 0 or msg == "ok":
+                    rate = done / max(1.0, time.time() - t0)
+                    eta = (len(conv_ids) - done) / max(1e-6, rate)
+                    shape_s = "" if shape is None else f" shape={shape}"
+                    dur_s = "" if dur <= 0 else f" audio={dur:.0f}s"
+                    print(
+                        f"  [{done}/{len(conv_ids)}] {conv}: {msg}{shape_s}{dur_s} "
+                        f"wrote={wrote} skipped={skipped} elapsed={time.time()-t0:.0f}s ETA={eta:.0f}s",
+                        flush=True,
+                    )
+        print(
+            f"[done] ok={ok}/{done}, wrote={wrote}, skipped={skipped}, "
+            f"cache={out_dir}, total={time.time()-t0:.0f}s",
+            flush=True,
+        )
+        return
     done = 0
     for k, conv in enumerate(conv_ids):
         out_path = out_dir / f"{conv}.npy"
