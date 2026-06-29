@@ -80,16 +80,16 @@ train:
   focal_gamma: 2.0
   label_smoothing: 0.05
 
-  epochs: 40
+  epochs: 20
   max_steps_per_epoch: 1000
   eval_valid_sample_count: 30000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  batch_size: 32
-  eval_batch_size: 64
+  batch_size: 64
+  eval_batch_size: 128
   log_every_steps: 40
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 1
 
   learning_rate: 5.0e-5
   warmup_ratio: 0.05
