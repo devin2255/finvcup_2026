@@ -86,8 +86,8 @@ train:
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  batch_size: 64
-  eval_batch_size: 128
+  batch_size: 48
+  eval_batch_size: 96
   log_every_steps: 40
   gradient_accumulation_steps: 1
 
