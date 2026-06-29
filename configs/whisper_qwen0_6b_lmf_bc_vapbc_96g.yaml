@@ -80,7 +80,7 @@ train:
   label_smoothing: 0.05
 
   epochs: 40
-  max_steps_per_epoch: 20000
+  max_steps_per_epoch: 1000
   eval_valid_sample_count: 30000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
