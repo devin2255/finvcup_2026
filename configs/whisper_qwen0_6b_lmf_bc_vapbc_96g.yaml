@@ -45,6 +45,7 @@ audio_encoder:
   proj_dim: 512
   freeze: true
   unfreeze_layers: 1
+  split_frozen_prefix: false
   tail_ratio: 0.25
   stereo_branch:
     enabled: true

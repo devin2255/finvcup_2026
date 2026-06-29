@@ -122,11 +122,13 @@ class WhisperAudioEncoder(nn.Module):
         self, model_name: str, sample_rate: int, proj_dim: int,
         freeze: bool = True, tail_ratio: float = 0.2,
         unfreeze_layers: int = 0,
+        split_frozen_prefix: bool = True,
     ):
         super().__init__()
         self.sample_rate = sample_rate
         self.freeze = freeze
         self.tail_ratio = tail_ratio
+        self.split_frozen_prefix = split_frozen_prefix
         self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
         self.encoder = WhisperModel.from_pretrained(model_name).encoder
         if self.freeze:
@@ -185,19 +187,24 @@ class WhisperAudioEncoder(nn.Module):
             inputs_embeds = F.gelu(enc.conv1(input_features))
             inputs_embeds = F.gelu(enc.conv2(inputs_embeds))
             inputs_embeds = inputs_embeds.permute(0, 2, 1)
-            all_positions = torch.arange(
-                enc.embed_positions.num_embeddings, device=inputs_embeds.device
-            )
-            hidden_states = inputs_embeds + enc.embed_positions(all_positions)
+            hidden_states = inputs_embeds + enc.embed_positions.weight[: inputs_embeds.shape[1]]
             hidden_states = F.dropout(hidden_states, p=enc.dropout, training=enc.training)
             for layer in enc.layers[:first_trainable]:
-                hidden_states = layer(hidden_states, None, layer_head_mask=None,
-                                      output_attentions=False)[0]
+                hidden_states = layer(
+                    hidden_states,
+                    attention_mask=None,
+                    layer_head_mask=None,
+                    output_attentions=False,
+                )[0]
 
         # Trainable tail layers + final layer_norm (autograd enabled).
         for layer in enc.layers[first_trainable:]:
-            hidden_states = layer(hidden_states, None, layer_head_mask=None,
-                                  output_attentions=False)[0]
+            hidden_states = layer(
+                hidden_states,
+                attention_mask=None,
+                layer_head_mask=None,
+                output_attentions=False,
+            )[0]
         return enc.layer_norm(hidden_states)
 
     def forward(self, wave: torch.Tensor) -> torch.Tensor:
@@ -207,10 +214,12 @@ class WhisperAudioEncoder(nn.Module):
         if self.freeze and not self.encoder_has_trainable_layers:
             with torch.no_grad():
                 hidden = self.encoder(input_features=input_features).last_hidden_state
-        else:
+        elif self.split_frozen_prefix:
             # Only the unfrozen tail layers build an autograd graph; the frozen
             # prefix runs under no_grad to save activation memory.
             hidden = self._forward_encoder_split(input_features)
+        else:
+            hidden = self.encoder(input_features=input_features).last_hidden_state
 
         # Only attend to the tail portion of the time axis
         T = hidden.shape[1]
@@ -588,6 +597,7 @@ class MultimodalTurnTakingModel(nn.Module):
                 freeze=bool(cfg["audio_encoder"].get("freeze", True)),
                 tail_ratio=float(cfg["audio_encoder"].get("tail_ratio", 0.2)),
                 unfreeze_layers=int(cfg["audio_encoder"].get("unfreeze_layers", 0)),
+                split_frozen_prefix=bool(cfg["audio_encoder"].get("split_frozen_prefix", True)),
             )
             sb_cfg = cfg["audio_encoder"].get("stereo_branch", {}) or {}
             if bool(sb_cfg.get("enabled", False)):
