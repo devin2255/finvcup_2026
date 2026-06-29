@@ -44,7 +44,7 @@ audio_encoder:
   model_name: /root/autodl-tmp/finvcup_2026/models/whisper-large-v3
   proj_dim: 512
   freeze: true
-  unfreeze_layers: 1
+  unfreeze_layers: 4
   split_frozen_prefix: false
   tail_ratio: 0.25
   stereo_branch:
