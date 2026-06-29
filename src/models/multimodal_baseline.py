@@ -140,6 +140,7 @@ class WhisperAudioEncoder(nn.Module):
             for layer_idx in range(max(0, total_layers - unfreeze_layers), total_layers):
                 for p in self.encoder.layers[layer_idx].parameters():
                     p.requires_grad = True
+        self._promote_trainable_encoder_params_to_float32()
         self.encoder_has_trainable_layers = any(p.requires_grad for p in self.encoder.parameters())
         hidden_size = int(self.encoder.config.d_model)
         self.attn_pool = AttentionPooling(hidden_size)
@@ -149,6 +150,19 @@ class WhisperAudioEncoder(nn.Module):
             nn.GELU(),
         )
         self.out_dim = proj_dim
+
+    def _promote_trainable_encoder_params_to_float32(self) -> None:
+        """Keep AMP-compatible trainable params even when HF weights load in fp16."""
+        promoted = 0
+        for p in self.encoder.parameters():
+            if p.requires_grad and p.is_floating_point() and p.dtype != torch.float32:
+                p.data = p.data.float()
+                promoted += p.numel()
+        if promoted:
+            print(
+                "[WhisperAudioEncoder] promoted "
+                f"{promoted:,} trainable encoder parameters to float32 for AMP"
+            )
 
     def _build_input_features(self, wave: torch.Tensor) -> torch.Tensor:
         mono = wave.mean(dim=1)
