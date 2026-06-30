@@ -101,3 +101,54 @@ def test_left_pads_when_fewer_than_n():
 def test_empty_audio_returns_zeros():
     out = vap_last_n_frames(_FakeMaai(), np.zeros((2, 0), np.float32), frame_samples=4, N=5)
     assert out.shape == (5, 18) and not out.any()
+
+
+# --- dualch + vapwin + BC tail: causal 21-dim VAP window ---
+from src.vap_feature_layout import append_bc_tail_features, flat_bc_result
+from src.vap_window import vap_bc_last_n_frames
+
+
+def test_append_bc_tail_features_is_causal_and_21_dims():
+    vap = np.zeros((5, 18), dtype=np.float32)
+    vap[:, 4] = np.arange(5, dtype=np.float32)
+    bc = np.array([0.1, 0.4, 0.2, 0.9, 0.3], dtype=np.float32)
+
+    out = append_bc_tail_features(vap, bc, frame_rate=10, tail_sec=0.3)
+
+    assert out.shape == (5, 21)
+    np.testing.assert_allclose(out[:, :18], vap)
+    np.testing.assert_allclose(out[:, 18], bc)
+    np.testing.assert_allclose(out[:, 19], [0.1, 0.4, 0.4, 0.9, 0.9])
+    np.testing.assert_allclose(out[:, 20], [0.1, 0.25, 0.23333333, 0.5, 0.46666667])
+
+
+def test_flat_bc_result_reads_scalar_probability():
+    np.testing.assert_allclose(flat_bc_result({"p_bc": [0.1, 0.7]}), 0.7)
+    np.testing.assert_allclose(flat_bc_result({"p_bc_detect": 0.3}), 0.3)
+    assert flat_bc_result({}) == 0.0
+
+
+class _FakeBcMaai(_FakeMaai):
+    def process(self, c1, c2):
+        self.result_dict_queue.put({"p_bc": float(self._i) / 10.0})
+        self._i += 1
+
+
+def test_vap_bc_last_n_frames_keeps_window_and_appends_bc_tail():
+    fs, M, N = 4, 6, 4
+    audio2 = np.zeros((2, fs * M), dtype=np.float32)
+
+    out = vap_bc_last_n_frames(
+        _FakeMaai(),
+        _FakeBcMaai(),
+        audio2,
+        frame_samples=fs,
+        N=N,
+        frame_rate=10,
+        bc_tail_sec=0.2,
+    )
+
+    assert out.shape == (N, 21)
+    np.testing.assert_array_equal(out[:, 4], np.array([2, 3, 4, 5], np.float32))
+    np.testing.assert_allclose(out[:, 18], [0.2, 0.3, 0.4, 0.5])
+    np.testing.assert_allclose(out[:, 19], [0.2, 0.3, 0.4, 0.5])
