@@ -8,6 +8,7 @@ CPC_MODEL=${CPC_MODEL:-${ROOT}/models/60k_epoch4-d0f474de.pt}
 VAP_LOCAL=${VAP_LOCAL:-${ROOT}/models/vap_mc_state_dict_ch_kyoto_10hz_20000msec.pt}
 BC_LOCAL=${BC_LOCAL:-${ROOT}/models/vap-bc_state_dict_ch_10hz_20000msec.pt}
 VAP_CACHE=${VAP_CACHE:-${ROOT}/.cache/vap_bc_ch_21d}
+VAP_OVERWRITE=${VAP_OVERWRITE:-1}
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
@@ -19,6 +20,10 @@ cd "${ROOT}"
 
 echo "[dualvapbc] config=${CONFIG}"
 echo "[dualvapbc] precompute cache=${VAP_CACHE}"
+PRECOMPUTE_EXTRA=()
+if [ "${VAP_OVERWRITE}" != "0" ]; then
+  PRECOMPUTE_EXTRA+=(--overwrite)
+fi
 python -m src.precompute_vap \
   --config "${CONFIG}" \
   --maai_dir ./MaAI \
@@ -30,7 +35,10 @@ python -m src.precompute_vap \
   --bc_enabled --bc_lang ch --bc_mode bc \
   --bc_local_model "${BC_LOCAL}" \
   --bc_tail_sec 2.0 \
-  --out_dir "${VAP_CACHE}"
+  --out_dir "${VAP_CACHE}" \
+  "${PRECOMPUTE_EXTRA[@]}"
+
+python -c "import glob, numpy as np; files=glob.glob('${VAP_CACHE}/*.npy'); assert files, 'no VAP cache files generated'; arr=np.load(files[0]); assert arr.ndim==2 and arr.shape[1]==21, f'bad VAP cache shape {arr.shape}, expected [F,21]'; print('[dualvapbc] cache shape OK', arr.shape, files[0])"
 
 echo "[dualvapbc] train"
 python -m src.train --config "${CONFIG}"

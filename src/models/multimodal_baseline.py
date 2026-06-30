@@ -186,19 +186,24 @@ class WhisperAudioEncoder(nn.Module):
             inputs_embeds = F.gelu(enc.conv1(input_features))
             inputs_embeds = F.gelu(enc.conv2(inputs_embeds))
             inputs_embeds = inputs_embeds.permute(0, 2, 1)
-            all_positions = torch.arange(
-                enc.embed_positions.num_embeddings, device=inputs_embeds.device
-            )
-            hidden_states = inputs_embeds + enc.embed_positions(all_positions)
+            hidden_states = inputs_embeds + enc.embed_positions.weight[: inputs_embeds.shape[1]]
             hidden_states = F.dropout(hidden_states, p=enc.dropout, training=enc.training)
             for layer in enc.layers[:first_trainable]:
-                hidden_states = layer(hidden_states, None, layer_head_mask=None,
-                                      output_attentions=False)[0]
+                hidden_states = layer(
+                    hidden_states,
+                    attention_mask=None,
+                    layer_head_mask=None,
+                    output_attentions=False,
+                )[0]
 
         # Trainable tail layers + final layer_norm (autograd enabled).
         for layer in enc.layers[first_trainable:]:
-            hidden_states = layer(hidden_states, None, layer_head_mask=None,
-                                  output_attentions=False)[0]
+            hidden_states = layer(
+                hidden_states,
+                attention_mask=None,
+                layer_head_mask=None,
+                output_attentions=False,
+            )[0]
         return enc.layer_norm(hidden_states)
 
     def forward(self, wave: torch.Tensor) -> torch.Tensor:
