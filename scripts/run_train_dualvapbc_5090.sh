@@ -8,7 +8,7 @@ CPC_MODEL=${CPC_MODEL:-${ROOT}/models/60k_epoch4-d0f474de.pt}
 VAP_LOCAL=${VAP_LOCAL:-${ROOT}/models/vap_mc_state_dict_ch_kyoto_10hz_20000msec.pt}
 BC_LOCAL=${BC_LOCAL:-${ROOT}/models/vap-bc_state_dict_ch_10hz_20000msec.pt}
 VAP_CACHE=${VAP_CACHE:-${ROOT}/.cache/vap_bc_ch_21d}
-VAP_OVERWRITE=${VAP_OVERWRITE:-1}
+VAP_OVERWRITE=${VAP_OVERWRITE:-0}
 
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
@@ -20,6 +20,7 @@ cd "${ROOT}"
 
 echo "[dualvapbc] config=${CONFIG}"
 echo "[dualvapbc] precompute cache=${VAP_CACHE}"
+echo "[dualvapbc] precompute overwrite=${VAP_OVERWRITE}"
 PRECOMPUTE_EXTRA=()
 if [ "${VAP_OVERWRITE}" != "0" ]; then
   PRECOMPUTE_EXTRA+=(--overwrite)
