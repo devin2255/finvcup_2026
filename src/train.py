@@ -20,6 +20,7 @@ from src.data import (
     split_conversation_ids,
 )
 from src.models import MultimodalTurnTakingModel
+from src.training_utils import _cast_trainable_float_params_to_fp32
 from src.utils import (
     cleanup_distributed,
     compute_multilabel_metrics,
@@ -363,6 +364,9 @@ def main():
     gt_test_labels = None
 
     model = MultimodalTurnTakingModel(cfg).to(device)
+    cast_count = _cast_trainable_float_params_to_fp32(model)
+    if cast_count > 0 and is_main:
+        print(f"[AMP] cast {cast_count} trainable floating params to fp32")
     if is_distributed():
         model = DDP(
             model,
