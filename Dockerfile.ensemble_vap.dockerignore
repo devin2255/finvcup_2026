@@ -5,6 +5,8 @@ train/
 test/
 test_data/
 outputs/
+docker_assets/
+_submit_out/
 .cache/
 .git/
 .github/
