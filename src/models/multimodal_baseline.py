@@ -214,9 +214,10 @@ class WhisperAudioEncoder(nn.Module):
             with torch.no_grad():
                 hidden = self.encoder(input_features=input_features).last_hidden_state
         else:
-            # Only the unfrozen tail layers build an autograd graph; the frozen
-            # prefix runs under no_grad to save activation memory.
-            hidden = self._forward_encoder_split(input_features)
+            # Use the official transformers forward path when tail layers are
+            # trainable. Newer Whisper SDPA mask internals are easy to break
+            # when manually replaying encoder layers.
+            hidden = self.encoder(input_features=input_features).last_hidden_state
 
         # Only attend to the tail portion of the time axis
         T = hidden.shape[1]
