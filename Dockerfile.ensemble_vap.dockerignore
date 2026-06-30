@@ -41,6 +41,14 @@ run.sh
 Dockerfile
 .dockerignore
 
+# Redundant Whisper conversion artifacts; keep model.safetensors + configs only.
+models/whisper-large-v3/model.fp32-*.safetensors
+models/whisper-large-v3/model.safetensors.index.fp32.json
+models/whisper-large-v3/pytorch_model*.bin
+models/whisper-large-v3/pytorch_model*.json
+models/whisper-large-v3/README.md
+models/whisper-large-v3/configuration.json
+
 # MaAI 的本地 git/site 元数据，保留代码本体
 MaAI/.git/
 MaAI/.github/
