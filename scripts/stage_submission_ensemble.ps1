@@ -19,10 +19,11 @@ $ErrorActionPreference = "Stop"
 $RepoRoot   = Split-Path -Parent $PSScriptRoot
 $WhisperSrc = "D:\bisai\modelscope\whisper-large-v3"
 $QwenSrc    = "D:\bisai\modelscope\Qwen3-0.6B"
-$CkptSrcDir = Join-Path $RepoRoot "outputs\lmf_vapfeat\checkpoints"
-$ManifestSrc = Join-Path $RepoRoot "outputs\lmf_vapfeat\logs\ensemble_manifest.json"
+$CkptSrcDir = Join-Path $RepoRoot "outputs\lmf_bc_vapbc_96g\checkpoints"
+$ManifestSrc = Join-Path $RepoRoot "outputs\lmf_bc_vapbc_96g\logs\ensemble_manifest.json"
 $CpcWeight  = Join-Path $RepoRoot "models\60k_epoch4-d0f474de.pt"
 $VapWeight  = Join-Path $RepoRoot "models\vap_mc_state_dict_ch_kyoto_10hz_20000msec.pt"
+$BcWeight   = Join-Path $RepoRoot "models\vap-bc_state_dict_ch_10hz_20000msec.pt"
 
 $WhisperKeep = @(
   "model.safetensors",
@@ -69,10 +70,18 @@ if (Test-Path $VapWeight) {
   exit 1
 }
 
+Write-Host "==> BC weight"
+if (Test-Path $BcWeight) {
+  Write-Host ("  [ok] {0} ({1:N1} MB)" -f $BcWeight, ((Get-Item $BcWeight).Length/1MB))
+} else {
+  Write-Host "  [ERR] missing $BcWeight" -ForegroundColor Red
+  exit 1
+}
+
 Write-Host "==> ensemble checkpoints + manifest"
 $CkptDst = Join-Path $RepoRoot "ckpt"
 New-Item -ItemType Directory -Force -Path $CkptDst | Out-Null
-foreach ($name in @("ensemble_ep3.pt","ensemble_ep4.pt","ensemble_ep5.pt","ensemble_ep6.pt","ensemble_ep7.pt")) {
+foreach ($name in @("ensemble_ep15.pt","ensemble_ep16.pt","ensemble_ep17.pt","ensemble_ep18.pt","ensemble_ep19.pt")) {
   $s = Join-Path $CkptSrcDir $name
   $d = Join-Path $CkptDst $name
   if (-not (Test-Path $s)) { Write-Host "  [ERR] missing checkpoint: $s" -ForegroundColor Red; exit 1 }

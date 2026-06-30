@@ -54,7 +54,8 @@ audio_encoder:
   model_name: /app/models/whisper-large-v3
   proj_dim: 512
   freeze: true
-  unfreeze_layers: 2
+  unfreeze_layers: 4
+  split_frozen_prefix: false
   tail_ratio: 0.25
   # dualch: 双声道活动分支（必须与训练一致，否则 stereo 参数加载不上 -> 架构不匹配）
   stereo_branch:
@@ -63,6 +64,7 @@ audio_encoder:
     conv_channels: [32, 64, 96]
     tail_sec: 6.0
     dropout: 0.1
+    time_pool: attn_max
 
 text_encoder:
   model_name: /app/models/Qwen3-0.6B
@@ -84,30 +86,32 @@ train:
   multi_label: true
   pos_weight_mode: capped_per_label
   pos_weight_cap: 8.0
+  pos_weight_cap_per_label:
+    bc: 16.0
   focal_gamma: 2.0
   label_smoothing: 0.05
 
-  epochs: 40
-  max_steps_per_epoch: 500
+  epochs: 20
+  max_steps_per_epoch: 1000
   eval_valid_sample_count: 30000
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  batch_size: 128
-  eval_batch_size: 256
+  batch_size: 48
+  eval_batch_size: 96
   log_every_steps: 40
   gradient_accumulation_steps: 1
 
-  learning_rate: 1.2e-4
-  warmup_ratio: 0.03
-  weight_decay: 0.03
-  ema_decay: 0.999
+  learning_rate: 5.0e-5
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  ema_decay: 0.995
   grad_clip_norm: 1.0
   use_amp: true
   use_ema: true
 
   save_metric: best_f1
-  best_checkpoint_name: best_lmf_vapfeat.pt
+  best_checkpoint_name: best_lmf_bc_vapbc_96g.pt
   early_stop_patience: 15
 
   ensemble_topk: 5
@@ -119,9 +123,9 @@ vap_aux:
 # infer_ensemble.py 默认从 test_cache_dir 读取（也可被 --vap_feat_dir 覆盖）。
 vap_feat:
   enabled: true
-  feat_dim: 18
+  feat_dim: 21
   frame_rate: 10
-  cache_dir: /app/.cache/vap_ch_kyoto
+  cache_dir: /app/.cache/vap_bc_ch_21d
   test_cache_dir: /app/.cache/vap_test
 
 env:
