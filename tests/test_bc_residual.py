@@ -1,5 +1,6 @@
 import torch
 import yaml
+from pathlib import Path
 
 from src.bc_residual import BcResidualHead, apply_label_residual
 
@@ -39,3 +40,14 @@ def test_gated_bc_configs_keep_bc_out_of_main_vap_encoder():
         assert cfg["audio_encoder"]["stereo_branch"]["enabled"] is True
         assert cfg["train"]["pos_weight_mode"] == "capped_per_label"
         assert "pos_weight_cap_per_label" not in cfg["train"]
+
+
+def test_gated_train_script_reuses_existing_cache_before_maai_precompute():
+    script = Path("scripts/run_train_dualvapbc_gated_5090.sh").read_text(encoding="utf-8")
+    assert 'if [[ "${VAP_OVERWRITE}" != "1" ]] && cache_ok;' in script
+    assert 'echo "[dualvapbc-gated] reuse existing VAP+BC cache"' in script
+    assert "--local_model" in script
+    assert "--vap_local_model" not in script
+    assert "--train_audio_dir" not in script
+    assert "--sample_rate" not in script
+    assert '/opt/maai-env/bin/python "${PRECOMPUTE_ARGS[@]}"' not in script
