@@ -103,7 +103,7 @@ COPY SUBMIT_README.md /app/README.md
 
 # 模型权重 / 5-成员 checkpoint / manifest
 COPY models/ /app/models/
-COPY ckpt/   /app/ckpt/
+COPY ckpt_submit/ /app/ckpt/
 
 RUN sed -i 's/\r$//' /app/run.sh /app/train.sh \
     && chmod +x /app/run.sh /app/train.sh \

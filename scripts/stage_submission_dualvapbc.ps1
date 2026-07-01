@@ -29,8 +29,33 @@ if ($members.Count -eq 0) {
   exit 1
 }
 
-Write-Host "==> staging ensemble checkpoints + manifest -> ckpt\"
-$CkptDst = Join-Path $RepoRoot "ckpt"
+Write-Host "==> validating first checkpoint architecture"
+$firstName = [string]$members[0].name
+$firstPath = Join-Path $CkptSrcDir $firstName
+$validateCode = @"
+import sys, torch
+path = sys.argv[1]
+ck = torch.load(path, map_location='cpu')
+cfg = ck.get('config', {})
+vf = cfg.get('vap_feat', {})
+audio = cfg.get('audio_encoder', {})
+if int(vf.get('feat_dim', -1)) != 21:
+    raise SystemExit(f'[ERR] {path} checkpoint vap_feat.feat_dim={vf.get("feat_dim")} != 21')
+if not bool((audio.get('stereo_branch') or {}).get('enabled', False)):
+    raise SystemExit(f'[ERR] {path} checkpoint stereo_branch is not enabled')
+sd = ck.get('model', {})
+w = sd.get('vap_feat_encoder.conv.0.weight')
+if w is None or tuple(w.shape)[1] != 21:
+    raise SystemExit(f'[ERR] {path} missing 21d vap_feat_encoder.conv.0.weight, got {None if w is None else tuple(w.shape)}')
+print(f'[ok] checkpoint config/output matches dualvapbc: {path}')
+"@
+python -c $validateCode $firstPath
+
+Write-Host "==> staging ensemble checkpoints + manifest -> ckpt_submit\"
+$CkptDst = Join-Path $RepoRoot "ckpt_submit"
+if (Test-Path $CkptDst) {
+  Get-ChildItem $CkptDst -File | Remove-Item -Force
+}
 New-Item -ItemType Directory -Force -Path $CkptDst | Out-Null
 foreach ($m in $members) {
   $name = $m.name

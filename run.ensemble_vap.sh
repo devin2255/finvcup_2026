@@ -34,8 +34,8 @@ t0=$(date +%s)
 # 单进程基准 ~80 frame/s -> 1000 段 ~66 min 超时；4 进程 ~18-22 min；8 进程更快
 # （VAP/CPC 是小模型，单进程 GPU 利用率低 -> 加进程能近线性提速）。
 # 默认 8；评测机直接 bash run.sh（注入不了 env），靠此内置默认。
-# 本地 smoke 可 docker run -e VAP_WORKERS=12 覆盖；若 OOM 降到 6/4。
-echo "[run] === Stage A: VAP precompute (workers=${VAP_WORKERS:-8}) ==="
+# VAP+BC 同时加载两套 MaAI；默认 4 workers 更稳，避免评测机 OOM/killed。
+echo "[run] === Stage A: VAP+BC precompute (workers=${VAP_WORKERS:-4}) ==="
 /opt/maai-env/bin/python -m src.precompute_vap_test \
   --maai_dir "${MAAI_DIR}" \
   --lang ch_kyoto --mode vap_mc \
@@ -49,7 +49,7 @@ echo "[run] === Stage A: VAP precompute (workers=${VAP_WORKERS:-8}) ==="
   --out_dir "${VAP_CACHE}" \
   --sample_rate 16000 \
   --window "${VAP_WINDOW:-20}" \
-  --workers "${VAP_WORKERS:-8}"
+  --workers "${VAP_WORKERS:-4}"
 
 t1=$(date +%s)
 echo "[run] stage A done in $((t1 - t0))s"
@@ -58,12 +58,13 @@ echo "[run] stage A done in $((t1 - t0))s"
 # 总预算 60min 的大头在这里：每模型 ~8-12min，5 个串行 ~40-60min。
 # ENSEMBLE_TOPK 设非空可只用前 K 个最强成员（manifest 已按指标降序）。
 # 时间紧时设 3（约 30min）；想要单模型快测设 1。默认空=全部 5 个。
-echo "[run] === Stage B: ensemble inference (topk=${ENSEMBLE_TOPK:-all}) ==="
+ENSEMBLE_TOPK=${ENSEMBLE_TOPK:-3}
+echo "[run] === Stage B: ensemble inference (topk=${ENSEMBLE_TOPK}) ==="
 python3 -m src.infer_ensemble \
   --config configs/submit_ensemble_vap.yaml \
   --test_root "${TEST_ROOT}" \
   --vap_feat_dir "${VAP_CACHE}" \
-  ${ENSEMBLE_TOPK:+--topk "${ENSEMBLE_TOPK}"} \
+  --topk "${ENSEMBLE_TOPK}" \
   --output_csv "${OUT_DIR}/submit.csv"
 
 t2=$(date +%s)
