@@ -25,6 +25,7 @@ mkdir -p "${OUT_DIR}" "${VAP_CACHE}"
 
 CPC_MODEL=/app/models/60k_epoch4-d0f474de.pt
 VAP_LOCAL=/app/models/vap_mc_state_dict_ch_kyoto_10hz_20000msec.pt
+BC_LOCAL=/app/models/bc_state_dict_ch_10hz_20000msec.pt
 MAAI_DIR=/app/MaAI
 
 t0=$(date +%s)
@@ -45,6 +46,11 @@ echo "[run] === Stage A: VAP precompute (workers=${VAP_WORKERS:-8}) ==="
   --out_dir "${VAP_CACHE}" \
   --sample_rate 16000 \
   --window "${VAP_WINDOW:-20}" \
+  --bc_enabled \
+  --bc_lang ch \
+  --bc_mode bc \
+  --bc_local_model "${BC_LOCAL}" \
+  --bc_tail_sec "${BC_TAIL_SEC:-2.0}" \
   --workers "${VAP_WORKERS:-8}"
 
 t1=$(date +%s)

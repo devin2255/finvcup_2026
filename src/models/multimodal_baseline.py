@@ -7,6 +7,7 @@ from transformers import AutoModel, WhisperFeatureExtractor, WhisperModel
 
 from src.vap_pool import VapWindowEncoder
 from src.audio_stereo import StereoActivityEncoder
+from src.bc_residual import BcResidualHead, apply_label_residual
 
 
 class AudioEncoder(nn.Module):
@@ -209,9 +210,10 @@ class WhisperAudioEncoder(nn.Module):
             with torch.no_grad():
                 hidden = self.encoder(input_features=input_features).last_hidden_state
         else:
-            # Only the unfrozen tail layers build an autograd graph; the frozen
-            # prefix runs under no_grad to save activation memory.
-            hidden = self._forward_encoder_split(input_features)
+            # Use the official transformers forward path when tail layers are
+            # trainable. Newer Whisper SDPA mask internals are easy to break
+            # when manually replaying encoder layers.
+            hidden = self.encoder(input_features=input_features).last_hidden_state
 
         # Only attend to the tail portion of the time axis
         T = hidden.shape[1]
@@ -661,9 +663,18 @@ class MultimodalTurnTakingModel(nn.Module):
         if self.use_vap_feat:
             self.vap_feat_dim = int(vf_cfg.get("feat_dim", 18))
             self.vap_window = int(vf_cfg.get("window", 20))
+            bc_res_cfg = vf_cfg.get("bc_residual", {}) or {}
+            self.use_bc_residual = bool(bc_res_cfg.get("enabled", False))
+            self.bc_feat_start = int(bc_res_cfg.get("start", 18))
+            self.bc_feat_dim = int(bc_res_cfg.get("feat_dim", 3))
+            self.vap_encoder_dim = (
+                int(bc_res_cfg.get("base_vap_dim", 18))
+                if self.use_bc_residual
+                else self.vap_feat_dim
+            )
             _h = self.fusion.out_dim
             self.vap_feat_encoder = VapWindowEncoder(
-                feat_dim=self.vap_feat_dim,
+                feat_dim=self.vap_encoder_dim,
                 hidden=_h,
                 conv_channels=int(vf_cfg.get("conv_channels", 64)),
                 dropout=float(cfg.get("fusion", {}).get("dropout", 0.0)),
@@ -671,6 +682,17 @@ class MultimodalTurnTakingModel(nn.Module):
             self.vap_feat_merge = nn.Sequential(
                 nn.Linear(_h * 2, _h), nn.LayerNorm(_h), nn.GELU(),
             )
+            if self.use_bc_residual:
+                label_names = [str(x).lower() for x in cfg.get("labels", {}).get("multi_targets", [])]
+                self.bc_target_index = label_names.index("bc") if "bc" in label_names else 0
+                self.bc_residual_head = BcResidualHead(
+                    feat_dim=self.bc_feat_dim,
+                    hidden=int(bc_res_cfg.get("hidden", 16)),
+                    dropout=float(bc_res_cfg.get("dropout", cfg.get("fusion", {}).get("dropout", 0.0))),
+                    scale=float(bc_res_cfg.get("scale", 1.0)),
+                )
+        else:
+            self.use_bc_residual = False
 
     def forward(
         self,
@@ -686,15 +708,27 @@ class MultimodalTurnTakingModel(nn.Module):
         context_feat = self.context_encoder(context_labels=context_labels)
         hand_feat = self.hand_features(context_labels)
         fused = self.fusion(audio_feat, text_feat, context_feat, hand_feat)
+        bc_residual = None
         if getattr(self, "use_vap_feat", False):
             if vap_feat is None:
                 vap_feat = fused.new_zeros(fused.shape[0], self.vap_window, self.vap_feat_dim)
             elif vap_feat.dim() == 2:
                 # 兼容旧单帧 [B, feat_dim] 输入：升一维成 [B, 1, feat_dim]
                 vap_feat = vap_feat.unsqueeze(1)
-            v = self.vap_feat_encoder(vap_feat.to(fused.dtype))
+            vap_feat = vap_feat.to(fused.dtype)
+            vap_for_encoder = vap_feat[..., : self.vap_encoder_dim]
+            if getattr(self, "use_bc_residual", False):
+                end = self.bc_feat_start + self.bc_feat_dim
+                if vap_feat.shape[-1] >= end:
+                    bc_window = vap_feat[..., self.bc_feat_start:end]
+                else:
+                    bc_window = vap_feat.new_zeros(vap_feat.shape[0], vap_feat.shape[1], self.bc_feat_dim)
+                bc_residual = self.bc_residual_head(bc_window)
+            v = self.vap_feat_encoder(vap_for_encoder)
             fused = self.vap_feat_merge(torch.cat([fused, v], dim=-1))
         logits = self.head(fused)
+        if bc_residual is not None and logits.dim() == 2:
+            logits = apply_label_residual(logits, bc_residual, self.bc_target_index)
         if self.num_targets == 1:
             logits = logits.squeeze(-1)
         if return_vap and getattr(self, "use_vap", False):

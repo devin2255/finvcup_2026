@@ -56,6 +56,12 @@ audio_encoder:
   freeze: true
   unfreeze_layers: 2
   tail_ratio: 0.25
+  stereo_branch:
+    enabled: true
+    n_mels: 64
+    conv_channels: [32, 64, 96]
+    tail_sec: 6.0
+    dropout: 0.1
 
 text_encoder:
   model_name: /app/models/Qwen3-0.6B
@@ -112,12 +118,20 @@ vap_aux:
 # infer_ensemble.py 默认从 test_cache_dir 读取（也可被 --vap_feat_dir 覆盖）。
 vap_feat:
   enabled: true
-  feat_dim: 18
+  feat_dim: 21
   window: 20          # vapwin: 取边界前 20 帧轨迹 [20,18]，模型内 conv+attention 池化
   conv_channels: 64   # VapWindowEncoder 卷积通道（须与训练一致）
   frame_rate: 10
-  cache_dir: /app/.cache/vap_ch_kyoto
+  cache_dir: /app/.cache/vap_bc_ch_21d
   test_cache_dir: /app/.cache/vap_test
+  bc_residual:
+    enabled: true
+    start: 18
+    feat_dim: 3
+    base_vap_dim: 18
+    hidden: 16
+    dropout: 0.1
+    scale: 1.0
 
 env:
   HF_HOME: /app/.cache/huggingface
