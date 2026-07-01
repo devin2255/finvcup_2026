@@ -59,6 +59,8 @@ python3 -m src.infer_ensemble \
   --config configs/submit_ensemble_vap.yaml \
   --test_root "${TEST_ROOT}" \
   --vap_feat_dir "${VAP_CACHE}" \
+  --ensemble_mode "${ENSEMBLE_MODE:-soft}" \
+  --threshold_mode "${ENSEMBLE_THRESHOLD_MODE:-mean}" \
   ${ENSEMBLE_TOPK:+--topk "${ENSEMBLE_TOPK}"} \
   --output_csv "${OUT_DIR}/submit.csv"
 

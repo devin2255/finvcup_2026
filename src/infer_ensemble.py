@@ -36,6 +36,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from src.data import TurnTakingTestDataset, build_collate_fn
+from src.inference_utils import combine_threshold_vectors
 from src.models import MultimodalTurnTakingModel
 from src.utils import load_config, set_env_paths
 
@@ -86,6 +87,15 @@ def parse_args():
         default="soft",
         help="soft=5 模型 sigmoid 概率取均值再用'阈值均值'二值化（推荐：保留 ep6 等强模型的"
         "高置信预测，不被弱模型多数票稀释）；hard=每模型用自己阈值二值化后多数投票（>=3 票）。",
+    )
+    p.add_argument(
+        "--threshold_mode",
+        choices=["mean", "best", "weighted_mean"],
+        default="mean",
+        help=(
+            "soft ensemble threshold strategy: mean=current behavior, "
+            "best=top member thresholds, weighted_mean=metric-weighted thresholds."
+        ),
     )
     return p.parse_args()
 
@@ -201,17 +211,19 @@ def main():
     # 累加结构（hard 与 soft 共用一遍 forward，避免重算）：
     #   votes[seg_id]      = 每标签得票数（hard 用）
     #   sum_probs[seg_id]  = 每标签概率累加（soft 用）
-    #   sum_thr            = 所有成员阈值累加（soft 用，最后除 num_members 取均值）
+    #   threshold_vectors  = 成员阈值列表（soft 用，按 threshold_mode 合成）
     votes: dict[str, np.ndarray] = {}
     sum_probs: dict[str, np.ndarray] = {}
-    sum_thr = np.zeros(n_labels, dtype=np.float64)
+    threshold_vectors: list[np.ndarray] = []
+    threshold_metrics: list[float] = []
     seg_order: list[str] = []  # 保持首次出现顺序（loader 确定性，各成员一致）
 
     for mi, member in enumerate(members):
         ckpt = torch.load(member["path"], map_location="cpu")
         thr_map = _member_thresholds(member, ckpt, label_cols, args.default_threshold)
         thr_vec = np.array([thr_map[name] for name in label_cols], dtype=np.float32)
-        sum_thr += thr_vec.astype(np.float64)
+        threshold_vectors.append(thr_vec.astype(np.float64))
+        threshold_metrics.append(float(member.get("metric", 1.0) or 1.0))
 
         model = MultimodalTurnTakingModel(cfg).to(device)
         # 瘦身/完整 checkpoint 均兼容：strict=False 叠加可训练参数到预训练骨干上。
@@ -282,8 +294,12 @@ def main():
     rows: list[dict] = []
 
     if mode == "soft":
-        mean_thr_vec = (sum_thr / num_members).astype(np.float64)
-        print(f"[ensemble] soft: mean thresholds per label = "
+        mean_thr_vec = combine_threshold_vectors(
+            threshold_vectors,
+            threshold_metrics,
+            args.threshold_mode,
+        )
+        print(f"[ensemble] soft: threshold_mode={args.threshold_mode} thresholds per label = "
               f"{ {name: round(float(mean_thr_vec[j]), 3) for j, name in enumerate(label_cols)} }")
         pos_count = np.zeros(n_labels, dtype=np.int64)
         for seg_id in seg_order:

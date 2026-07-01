@@ -1,14 +1,4 @@
-# ============================================================
-# 准备 vapwin v2 镜像构建上下文（ensemble + 真 VAP，VAP 窗口池化变体）。
-#
-# 与 stage_submission_ensemble.ps1 的唯一区别：checkpoint/manifest 来自
-# outputs\lmf_vapwin（而非 lmf_vapfeat）。骨干权重(whisper/Qwen)、CPC、VAP 权重
-# 已在 models\ 下，本脚本只校验存在性 + 刷新 ckpt\。
-#
-# 前置：先在 feat/vap-window-pool 分支训练出 outputs\lmf_vapwin\checkpoints\*。
-# 用法（仓库根目录，且已 git checkout feat/vap-window-pool）：
-#   powershell -File scripts\stage_submission_vapwin.ps1
-# ============================================================
+# Stage dualch + vapwin ensemble assets for Docker submission.
 $ErrorActionPreference = "Stop"
 
 $RepoRoot    = Split-Path -Parent $PSScriptRoot
@@ -24,21 +14,43 @@ foreach ($p in @($WhisperDir, $QwenDir, $CpcWeight, $VapWeight)) {
   if (Test-Path $p) { Write-Host "  [ok] $p" }
   else { Write-Host "  [ERR] missing $p" -ForegroundColor Red; exit 1 }
 }
-foreach ($f in @("model.safetensors","config.json")) {
-  if (-not (Test-Path (Join-Path $WhisperDir $f))) { Write-Host "  [ERR] whisper missing $f" -ForegroundColor Red; exit 1 }
-  if (-not (Test-Path (Join-Path $QwenDir $f)))    { Write-Host "  [ERR] qwen missing $f"    -ForegroundColor Red; exit 1 }
+foreach ($f in @("model.safetensors", "config.json")) {
+  if (-not (Test-Path (Join-Path $WhisperDir $f))) {
+    Write-Host "  [ERR] whisper missing $f" -ForegroundColor Red
+    exit 1
+  }
+  if (-not (Test-Path (Join-Path $QwenDir $f))) {
+    Write-Host "  [ERR] qwen missing $f" -ForegroundColor Red
+    exit 1
+  }
 }
 
 Write-Host "==> staging vapwin ensemble checkpoints + manifest -> ckpt\"
+if (-not (Test-Path $ManifestSrc)) {
+  Write-Host "  [ERR] missing manifest: $ManifestSrc" -ForegroundColor Red
+  exit 1
+}
+
+$manifest = Get-Content $ManifestSrc -Raw | ConvertFrom-Json
+$members = @($manifest.members)
+if ($members.Count -eq 0) {
+  Write-Host "  [ERR] manifest has no members" -ForegroundColor Red
+  exit 1
+}
+
 $CkptDst = Join-Path $RepoRoot "ckpt"
 New-Item -ItemType Directory -Force -Path $CkptDst | Out-Null
-foreach ($name in @("ensemble_ep3.pt","ensemble_ep4.pt","ensemble_ep5.pt","ensemble_ep6.pt","ensemble_ep7.pt")) {
+foreach ($m in $members) {
+  $name = $m.name
   $s = Join-Path $CkptSrcDir $name
   $d = Join-Path $CkptDst $name
-  if (-not (Test-Path $s)) { Write-Host "  [ERR] missing checkpoint: $s" -ForegroundColor Red; exit 1 }
-  Copy-Item $s $d -Force; Write-Host "  [ok] $name"   # 覆盖旧 vapfeat 成员
+  if (-not (Test-Path $s)) {
+    Write-Host "  [ERR] missing checkpoint: $s" -ForegroundColor Red
+    exit 1
+  }
+  Copy-Item $s $d -Force
+  Write-Host ("  [ok] {0} epoch={1} metric={2}" -f $name, $m.epoch, $m.metric)
 }
-if (-not (Test-Path $ManifestSrc)) { Write-Host "  [ERR] missing manifest: $ManifestSrc" -ForegroundColor Red; exit 1 }
 Copy-Item $ManifestSrc (Join-Path $CkptDst "ensemble_manifest.json") -Force
 Write-Host "  [ok] ensemble_manifest.json"
 
@@ -52,4 +64,4 @@ Write-Host "==> sizes:"
   }
 }
 Write-Host ""
-Write-Host "下一步: docker build -f Dockerfile.ensemble_vap -t finvcup-infer:vapwin ."
+Write-Host "Next: docker build -f Dockerfile.ensemble_vap -t finvcup-infer:dualch-vapwin-inferopt ."
