@@ -90,14 +90,16 @@ train:
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
+  # 单卡 RTX 5090：batch 64（等效批量从 4 卡 512 降到 64），lr 按
+  # lmf_dualvapbc_5090 同卡已验证配方降到 8e-5；eval_batch 128 防峰值 OOM。
   batch_size: 64
-  eval_batch_size: 256
+  eval_batch_size: 128
   log_every_steps: 40
   gradient_accumulation_steps: 1
 
-  learning_rate: 1.2e-4
-  warmup_ratio: 0.03
-  weight_decay: 0.03
+  learning_rate: 8.0e-5
+  warmup_ratio: 0.04
+  weight_decay: 0.02
   ema_decay: 0.999
   grad_clip_norm: 1.0
   use_amp: true

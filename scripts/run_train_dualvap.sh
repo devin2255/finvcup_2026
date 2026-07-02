@@ -7,14 +7,14 @@ set -e
 #   前置：.cache/vap_ch_kyoto 训练缓存（与 lmf_vapfeat/lmf_vapwin 共用，无需重算）。
 #   A/B 基线：lmf_dualch（看 vapwin 叠加净增益）与 lmf_vapwin（看 stereo 叠加净增益）。
 # 使用方法:
-#   bash scripts/run_train_dualvap.sh          # 默认 4 卡
+#   bash scripts/run_train_dualvap.sh          # 默认单卡（5090）
 #   NUM_GPUS=2 CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_train_dualvap.sh
 # ==========================================================
 
 CONFIG_FILE="configs/whisper_qwen0_6b_lmf_dualvap.yaml"
-NUM_GPUS=${NUM_GPUS:-4}
+NUM_GPUS=${NUM_GPUS:-1}
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

@@ -8,14 +8,14 @@ set -e
 # A/B 基线：lmf_dualvap（Stage 1）。
 # 观察指标：bc_best_f1 / bcdense_best_f1（epoch 日志与 eval_epoch_*.json）。
 # 使用方法:
-#   bash scripts/run_train_dualvap_bcd.sh
+#   bash scripts/run_train_dualvap_bcd.sh      # 默认单卡（5090）
 #   NUM_GPUS=2 CUDA_VISIBLE_DEVICES=0,1 bash scripts/run_train_dualvap_bcd.sh
 # ==========================================================
 
 CONFIG_FILE="configs/whisper_qwen0_6b_lmf_dualvap_bcd.yaml"
-NUM_GPUS=${NUM_GPUS:-4}
+NUM_GPUS=${NUM_GPUS:-1}
 
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
