@@ -12,8 +12,11 @@ VAP_FEAT_DIM = 18
 def _extract_vap_window(arr, fr: int, N: int, feat_dim: int = VAP_FEAT_DIM) -> np.ndarray:
     """取以帧 ``fr`` 结尾、长度 ``N`` 的窗口 -> [N, feat_dim]。
 
-    - ``arr`` 为整段 ``[F, feat_dim]``（训练缓存）或测试缓存 ``[M, feat_dim]``；
-      旧的单帧 ``(feat_dim,)`` 视为 1 帧。``None``/空 -> 全零。
+    - ``arr`` 为整段 ``[F, D]``（训练缓存）或测试缓存 ``[M, D]``；
+      旧的单帧 ``(D,)`` 视为 1 帧。``None``/空 -> 全零。
+    - 列数按 ``feat_dim`` 对齐：D > feat_dim 时取前 feat_dim 列（21 维 BC 扩展
+      缓存是"18 维原布局 + 末尾追加 3 维"，前缀稳定，可安全裁剪复用）；
+      D < feat_dim 时右侧补零。
     - 不足 N 帧时**左侧复制最早一帧**补齐，保持末帧=边界的时序方向。
     - ``fr`` 自动 clamp 到 ``[0, len-1]``。
     """
@@ -24,6 +27,13 @@ def _extract_vap_window(arr, fr: int, N: int, feat_dim: int = VAP_FEAT_DIM) -> n
         arr = arr.reshape(1, -1)
     if arr.shape[0] == 0:
         return np.zeros((N, feat_dim), dtype=np.float32)
+    if arr.shape[1] > feat_dim:
+        arr = arr[:, :feat_dim]
+    elif arr.shape[1] < feat_dim:
+        arr = np.concatenate(
+            [arr, np.zeros((arr.shape[0], feat_dim - arr.shape[1]), dtype=np.float32)],
+            axis=1,
+        )
     fr = int(min(max(fr, 0), arr.shape[0] - 1))
     start = max(0, fr - N + 1)
     window = arr[start: fr + 1]                       # [<=N, D]

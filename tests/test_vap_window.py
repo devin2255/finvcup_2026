@@ -34,6 +34,21 @@ def test_fr_clamped_above_range():
     np.testing.assert_array_equal(w, arr[2:5])           # fr clamps to 4
 
 
+def test_wider_cache_21d_truncated_to_first_18_columns():
+    # 21 维 BC 扩展缓存 = 18 维原布局 + 末尾 3 维；feat_dim=18 时应取前 18 列
+    arr = np.arange(30 * 21, dtype=np.float32).reshape(30, 21)
+    w = _extract_vap_window(arr, fr=29, N=5, feat_dim=18)
+    assert w.shape == (5, 18)
+    np.testing.assert_array_equal(w, arr[25:30, :18])
+
+
+def test_narrower_cache_zero_padded_to_feat_dim():
+    arr = np.ones((10, 12), dtype=np.float32)
+    w = _extract_vap_window(arr, fr=9, N=4, feat_dim=18)
+    assert w.shape == (4, 18)
+    assert w[:, :12].all() and not w[:, 12:].any()
+
+
 def test_old_1d_single_frame_treated_as_one_frame():
     arr = np.arange(18, dtype=np.float32)                 # shape (18,)
     w = _extract_vap_window(arr, fr=0, N=4)
