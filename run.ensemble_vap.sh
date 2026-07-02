@@ -49,7 +49,7 @@ echo "[run] === Stage A: VAP+BC precompute (workers=${VAP_WORKERS:-4}) ==="
   --out_dir "${VAP_CACHE}" \
   --sample_rate 16000 \
   --window "${VAP_WINDOW:-20}" \
-  --workers "${VAP_WORKERS:-4}"
+  --workers "${VAP_WORKERS:-8}"
 
 t1=$(date +%s)
 echo "[run] stage A done in $((t1 - t0))s"
