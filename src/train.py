@@ -24,6 +24,7 @@ from src.utils import (
     cleanup_distributed,
     compute_multilabel_metrics,
     ensure_dirs,
+    find_best_f1_threshold,
     is_distributed,
     load_config,
     save_json,
@@ -55,7 +56,10 @@ def evaluate(
     max_batches: int | None = None,
 ):
     model.eval()
-    all_labels, all_probs = [], []
+    # BC 密集头诊断：dense 逐 chunk 概率取 max 即"窗口内是否出现 BC"的替代概率，
+    # 与主头 bc 概率同口径评估，用于判断推理侧是否值得改用/融合 dense 头。
+    use_bc_dense = bool(getattr(model, "use_bc_dense", False))
+    all_labels, all_probs, all_bcd_probs = [], [], []
     for bi, batch in enumerate(tqdm(data_loader, desc="eval", leave=False)):
         if max_batches is not None and bi >= max_batches:
             break
@@ -69,13 +73,20 @@ def evaluate(
             vap_feat = vap_feat.to(device, non_blocking=True)
 
         with torch.amp.autocast("cuda", enabled=use_amp):
-            logits = model(
+            out = model(
                 waveform=waveform,
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 context_labels=context_labels,
                 vap_feat=vap_feat,
+                return_bc_dense=use_bc_dense,
             )
+        if use_bc_dense:
+            logits, bcd_logits = out
+            bcd_win_prob = torch.sigmoid(bcd_logits.float()).amax(dim=1)  # [B]
+            all_bcd_probs.extend(bcd_win_prob.detach().cpu().numpy().tolist())
+        else:
+            logits = out
 
         probs = torch.sigmoid(logits)
         all_labels.extend(labels.detach().cpu().numpy().tolist())
@@ -85,7 +96,22 @@ def evaluate(
         torch.as_tensor(all_labels).numpy() if len(all_labels) > 0 else np.array([])
     )
     if labels_np.ndim == 2:
-        return compute_multilabel_metrics(all_labels, all_probs, label_names=label_names)
+        metrics = compute_multilabel_metrics(all_labels, all_probs, label_names=label_names)
+        if use_bc_dense and label_names and "bc" in label_names and all_bcd_probs:
+            bc_idx = label_names.index("bc")
+            y_bc = labels_np[:, bc_idx].astype(int)
+            p_bcd = np.asarray(all_bcd_probs, dtype=float)
+            thr, bf1 = find_best_f1_threshold(p_bcd, y_bc)
+            metrics["bcdense_best_f1"] = float(bf1)
+            metrics["bcdense_best_threshold"] = float(thr)
+            try:
+                from sklearn.metrics import roc_auc_score
+
+                if len(np.unique(y_bc)) > 1:
+                    metrics["bcdense_roc_auc"] = float(roc_auc_score(y_bc, p_bcd))
+            except Exception:
+                pass
+        return metrics
     raise RuntimeError("Baseline 固化为多标签训练，evaluate 不应进入二分类分支。")
 
 
@@ -289,6 +315,18 @@ def main():
     if is_main and use_vap_feat:
         print(f"[VAP-feat] enabled: cache_dir={vap_feat_dir}, frame_rate={vap_feat_rate}, dim={vap_feat_dim_cfg}")
 
+    # BC 逐 chunk 密集监督（多任务辅助）：25x 监督信号专攻 BC。
+    bc_dense_cfg = cfg.get("bc_dense", {}) or {}
+    use_bc_dense = bool(bc_dense_cfg.get("enabled", False))
+    bc_dense_weight = float(bc_dense_cfg.get("weight", 0.5))
+    bc_dense_pos_weight = float(bc_dense_cfg.get("pos_weight", 20.0))
+    bc_label_id = int(cfg.get("labels", {}).get("BC", 2))
+    if is_main and use_bc_dense:
+        print(
+            f"[BC-dense] enabled: weight={bc_dense_weight}, "
+            f"pos_weight={bc_dense_pos_weight}, bc_label_id={bc_label_id}"
+        )
+
     train_dataset = TurnTakingTrainDataset(
         samples=train_samples,
         train_audio_dir=train_audio_dir,
@@ -311,6 +349,8 @@ def main():
         vap_frame_rate=vap_feat_rate,
         vap_feat_dim=vap_feat_dim_cfg,
         vap_window=vap_feat_window_cfg,
+        bc_dense_target=use_bc_dense,
+        bc_label_id=bc_label_id,
     )
     valid_dataset = TurnTakingTrainDataset(
         samples=valid_eval_samples,
@@ -415,6 +455,16 @@ def main():
     # VAP 辅助损失（多任务）。仅 use_vap 时启用，对未来双声道 VA 做 BCE。
     vap_criterion = torch.nn.BCEWithLogitsLoss() if use_vap else None
 
+    # BC 密集监督损失：逐 chunk BCE。BC 逐 chunk 正例率远低于窗口级(~3.65%)，
+    # 用固定 pos_weight（config bc_dense.pos_weight）平衡，不与主头 pos_weight 联动。
+    bc_dense_criterion = (
+        torch.nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor(bc_dense_pos_weight, device=device)
+        )
+        if use_bc_dense
+        else None
+    )
+
     max_steps_per_epoch_cfg = cfg["train"].get("max_steps_per_epoch", None)
     max_steps_per_epoch = (
         int(max_steps_per_epoch_cfg) if max_steps_per_epoch_cfg is not None else None
@@ -517,30 +567,39 @@ def main():
             vap_feat = batch.get("vap_feat")
             if vap_feat is not None:
                 vap_feat = vap_feat.to(device, non_blocking=True)
+            bc_dense_target = batch.get("bc_dense")
+            if bc_dense_target is not None:
+                bc_dense_target = bc_dense_target.to(device, non_blocking=True)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
-                if use_vap:
-                    logits, vap_logits = model(
-                        waveform=waveform,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        context_labels=context_labels,
-                        return_vap=True,
-                        vap_feat=vap_feat,
-                    )
-                    main_loss = criterion(logits, labels)
-                    # vap_target [B,2,bins] -> [B,2*bins]，与 vap_head 输出对齐
-                    vap_loss = vap_criterion(vap_logits, vap_target.flatten(1))
-                    loss = (main_loss + vap_weight * vap_loss) / accum_steps
+                out = model(
+                    waveform=waveform,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    context_labels=context_labels,
+                    return_vap=use_vap,
+                    vap_feat=vap_feat,
+                    return_bc_dense=use_bc_dense,
+                )
+                # 输出顺序: logits[, vap_logits][, bc_dense_logits]
+                if use_vap and use_bc_dense:
+                    logits, vap_logits, bc_dense_logits = out
+                elif use_vap:
+                    logits, vap_logits = out
+                elif use_bc_dense:
+                    logits, bc_dense_logits = out
                 else:
-                    logits = model(
-                        waveform=waveform,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        context_labels=context_labels,
-                        vap_feat=vap_feat,
+                    logits = out
+
+                loss = criterion(logits, labels)
+                if use_vap:
+                    # vap_target [B,2,bins] -> [B,2*bins]，与 vap_head 输出对齐
+                    loss = loss + vap_weight * vap_criterion(vap_logits, vap_target.flatten(1))
+                if use_bc_dense:
+                    loss = loss + bc_dense_weight * bc_dense_criterion(
+                        bc_dense_logits, bc_dense_target
                     )
-                    loss = criterion(logits, labels) / accum_steps
+                loss = loss / accum_steps
 
             if not torch.isfinite(loss):
                 if is_main:
@@ -651,13 +710,19 @@ def main():
             save_json(Path(paths["logs_dir"]) / f"thresholds_epoch_{epoch}.json", {"thresholds": valid_thresholds})
             if use_multi_label:
                 valid_per_label = _format_multilabel_metrics_line(metrics_valid, metric_label_names)
+                bcd_line = ""
+                if "bcdense_best_f1" in metrics_valid:
+                    bcd_line = (
+                        f" | bcdense[bf1={metrics_valid['bcdense_best_f1']:.4f},"
+                        f"auc={metrics_valid.get('bcdense_roc_auc', 0.5):.4f}]"
+                    )
                 print(
                     f"[Epoch {epoch}] train_loss={epoch_loss_sum / max(1, epoch_step_count):.6f} "
                     f"valid_macro_acc={metrics_valid['macro_accuracy']:.4f} "
                     f"valid_macro_f1={metrics_valid['macro_f1']:.4f} "
                     f"valid_macro_best_f1={metrics_valid['macro_best_f1']:.4f} "
                     f"valid_macro_auc={metrics_valid['macro_roc_auc']:.4f} "
-                    f"| valid[{valid_per_label}] "
+                    f"| valid[{valid_per_label}]{bcd_line} "
                     f"best_{save_metric}={max(best_metric, metric_value):.4f}"
                 )
             else:
@@ -680,6 +745,10 @@ def main():
                         writer.add_scalar(f"valid/{n}_best_f1", metrics_valid[f"{n}_best_f1"], epoch)
                         writer.add_scalar(f"valid/{n}_best_threshold", metrics_valid[f"{n}_best_threshold"], epoch)
                         writer.add_scalar(f"valid/{n}_roc_auc", metrics_valid[f"{n}_roc_auc"], epoch)
+                    if "bcdense_best_f1" in metrics_valid:
+                        writer.add_scalar("valid/bcdense_best_f1", metrics_valid["bcdense_best_f1"], epoch)
+                        if "bcdense_roc_auc" in metrics_valid:
+                            writer.add_scalar("valid/bcdense_roc_auc", metrics_valid["bcdense_roc_auc"], epoch)
                 else:
                     writer.add_scalar("valid/accuracy", metrics_valid["accuracy"], epoch)
                     writer.add_scalar("valid/f1", metrics_valid["f1"], epoch)

@@ -11,6 +11,7 @@ import torch
 import torchaudio
 from torch.utils.data import Dataset
 
+from src.bc_dense import bc_dense_target as _bc_dense_target
 from src.vap_window import _extract_vap_window
 
 
@@ -179,6 +180,8 @@ class TurnTakingTrainDataset(Dataset):
         vap_frame_rate: float = 10.0,
         vap_feat_dim: int = 18,
         vap_window: int = 20,
+        bc_dense_target: bool = False,
+        bc_label_id: int = 2,
     ) -> None:
         self.samples = list(samples)
         self.train_audio_dir = train_audio_dir
@@ -203,6 +206,9 @@ class TurnTakingTrainDataset(Dataset):
         self.vap_frame_rate = float(vap_frame_rate)
         self.vap_feat_dim = int(vap_feat_dim)
         self.vap_window = int(vap_window)
+        # BC 逐 chunk 密集监督目标（仅训练）：未来 target_chunks 逐 chunk 是否为 BC
+        self.bc_dense_target = bool(bc_dense_target)
+        self.bc_label_id = int(bc_label_id)
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -343,6 +349,10 @@ class TurnTakingTrainDataset(Dataset):
         }
         if vap_grid is not None:
             out["vap_target"] = vap_grid
+        if self.bc_dense_target:
+            out["bc_dense"] = torch.from_numpy(
+                _bc_dense_target(labels, end_idx, self.target_chunks, self.bc_label_id)
+            )
         if self.vap_feat_dir is not None:
             arr = self._load_vap_feats(sample.conv_id)
             fr = int(round(end_idx * self.chunk_ms * self.vap_frame_rate / 1000.0))
@@ -477,6 +487,9 @@ class CollateFn:
 
         if "vap_feat" in batch[0]:
             out["vap_feat"] = torch.stack([b["vap_feat"] for b in batch], dim=0)
+
+        if "bc_dense" in batch[0]:
+            out["bc_dense"] = torch.stack([b["bc_dense"] for b in batch], dim=0)
 
         if "label" in batch[0]:
             out["label"] = torch.stack([b["label"] for b in batch], dim=0)

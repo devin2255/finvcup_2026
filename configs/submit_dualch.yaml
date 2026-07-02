@@ -1,0 +1,97 @@
+# ============================================================
+# 提交推理 config：dualch（stereo 双声道分支 + 单帧 18d VAP 特征，真榜 0.6396）。
+# 供 src.infer_ensemble_multi 的 dualch 模型组使用。
+# 关键点：
+#   - stereo_branch.enabled: true（与 lmf_dualch 训练一致）
+#   - vap_feat.window: 1 -> 模型构建旧版单帧 vap_feat_proj（Linear 18->320），
+#     与 lmf_dualch checkpoint 键名/结构完全一致；测试缓存可直接复用
+#     window=20 的 (20,18) 文件（forward 自动取末帧=边界帧）。
+# ============================================================
+seed: 42
+chunk_ms: 80
+context_chunks: 375
+target_chunks: 25
+stride: 2
+sample_rate: 16000
+max_train_samples: null
+max_valid_samples: null
+num_workers: 8
+
+paths:
+  project_root: /app
+  train_audio_dir: /app/data/train/audio
+  train_text_dir: /app/data/train/text
+  train_labels_dir: /app/data/train/labels
+
+  output_root: /app/outputs/submit
+  checkpoints_dir: /app/ckpt/dualch
+  logs_dir: /app/ckpt/dualch
+
+  cache_root: /app/.cache
+
+labels:
+  C: 0
+  T: 1
+  BC: 2
+  I: 3
+  NA: 4
+  positive_ids: [1, 2, 3]
+  multi_targets: [C, NA, I, BC, T]
+
+split:
+  valid_ratio: 0.1
+  by_conversation: true
+
+audio_encoder:
+  type: whisper
+  model_name: /app/models/whisper-large-v3
+  proj_dim: 512
+  freeze: true
+  unfreeze_layers: 2
+  tail_ratio: 0.25
+  stereo_branch:
+    enabled: true
+    n_mels: 64
+    conv_channels: [32, 64, 96]
+    tail_sec: 6.0
+    dropout: 0.1
+
+text_encoder:
+  model_name: /app/models/Qwen3-0.6B
+  max_length: 256
+  freeze_backbone: true
+
+context_encoder:
+  vocab_size: 5
+  embed_dim: 24
+  channels: [48, 96]
+  tail_k: 75
+
+fusion:
+  hidden_dim: 320
+  bilinear_rank: 64
+  dropout: 0.25
+
+train:
+  multi_label: true
+  eval_batch_size: 256
+  use_amp: true
+
+vap_aux:
+  enabled: false
+
+vap_feat:
+  enabled: true
+  feat_dim: 18
+  window: 1           # 单帧旧架构（vap_feat_proj）；缓存可复用 (20,18)，取末帧
+  frame_rate: 10
+  cache_dir: /app/.cache/vap_ch_kyoto
+  test_cache_dir: /app/.cache/vap_test
+
+env:
+  HF_HOME: /app/.cache/huggingface
+  TRANSFORMERS_CACHE: /app/.cache/huggingface
+  TORCH_HOME: /app/.cache/torch
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  TOKENIZERS_PARALLELISM: "false"

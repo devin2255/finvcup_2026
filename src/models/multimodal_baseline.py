@@ -656,20 +656,40 @@ class MultimodalTurnTakingModel(nn.Module):
 
         # VAP 特征晚融合（第5模态）：预计算的话轮先验投影后与融合表征拼接，再过一层回到 hidden。
         # 推理不带 vap_feat 时用零向量，架构一致、不崩。
+        # window<=1 时走旧版单帧 Linear 投影（vap_feat_proj），保证 lmf_dualch 等
+        # 旧 checkpoint 键名/结构完全一致，可被跨模型软投票直接加载。
         vf_cfg = cfg.get("vap_feat", {}) or {}
         self.use_vap_feat = bool(vf_cfg.get("enabled", False))
         if self.use_vap_feat:
             self.vap_feat_dim = int(vf_cfg.get("feat_dim", 18))
             self.vap_window = int(vf_cfg.get("window", 20))
             _h = self.fusion.out_dim
-            self.vap_feat_encoder = VapWindowEncoder(
-                feat_dim=self.vap_feat_dim,
-                hidden=_h,
-                conv_channels=int(vf_cfg.get("conv_channels", 64)),
-                dropout=float(cfg.get("fusion", {}).get("dropout", 0.0)),
-            )
+            if self.vap_window <= 1:
+                self.vap_feat_proj = nn.Sequential(
+                    nn.Linear(self.vap_feat_dim, _h), nn.LayerNorm(_h), nn.GELU(),
+                )
+            else:
+                self.vap_feat_encoder = VapWindowEncoder(
+                    feat_dim=self.vap_feat_dim,
+                    hidden=_h,
+                    conv_channels=int(vf_cfg.get("conv_channels", 64)),
+                    dropout=float(cfg.get("fusion", {}).get("dropout", 0.0)),
+                )
             self.vap_feat_merge = nn.Sequential(
                 nn.Linear(_h * 2, _h), nn.LayerNorm(_h), nn.GELU(),
+            )
+
+        # BC 逐 chunk 密集监督头（多任务，仅训练用）：从最终融合表征预测未来
+        # target_chunks 内逐 chunk 是否出现 BC，把窗口级稀疏监督放大为 25x 密集
+        # 监督，专攻 BC（macro 单点瓶颈）。推理不调用，不进提交路径。
+        bc_cfg = cfg.get("bc_dense", {}) or {}
+        self.use_bc_dense = bool(bc_cfg.get("enabled", False))
+        if self.use_bc_dense:
+            self.bc_dense_chunks = int(cfg.get("target_chunks", 25))
+            self.bc_dense_head = nn.Sequential(
+                nn.Linear(self.fusion.out_dim, self.fusion.out_dim),
+                nn.GELU(),
+                nn.Linear(self.fusion.out_dim, self.bc_dense_chunks),
             )
 
     def forward(
@@ -680,23 +700,44 @@ class MultimodalTurnTakingModel(nn.Module):
         context_labels: torch.Tensor,
         return_vap: bool = False,
         vap_feat=None,
+        return_bc_dense: bool = False,
     ):
+        """返回值约定（保持向后兼容）：
+        - 默认: logits
+        - return_vap: (logits, vap_logits)
+        - return_bc_dense: (logits, bc_dense_logits)
+        - 两者同时: (logits, vap_logits, bc_dense_logits)
+        """
         audio_feat = self.audio_encoder(waveform)
         text_feat = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask)
         context_feat = self.context_encoder(context_labels=context_labels)
         hand_feat = self.hand_features(context_labels)
         fused = self.fusion(audio_feat, text_feat, context_feat, hand_feat)
         if getattr(self, "use_vap_feat", False):
-            if vap_feat is None:
-                vap_feat = fused.new_zeros(fused.shape[0], self.vap_window, self.vap_feat_dim)
-            elif vap_feat.dim() == 2:
-                # 兼容旧单帧 [B, feat_dim] 输入：升一维成 [B, 1, feat_dim]
-                vap_feat = vap_feat.unsqueeze(1)
-            v = self.vap_feat_encoder(vap_feat.to(fused.dtype))
+            if self.vap_window <= 1:
+                # 旧版单帧路径：[B, feat_dim] 直接 Linear 投影
+                if vap_feat is None:
+                    vap_feat = fused.new_zeros(fused.shape[0], self.vap_feat_dim)
+                elif vap_feat.dim() == 3:
+                    # 窗口缓存 [B, N, feat_dim] 喂给单帧模型：取末帧（边界帧）
+                    vap_feat = vap_feat[:, -1, :]
+                v = self.vap_feat_proj(vap_feat.to(fused.dtype))
+            else:
+                if vap_feat is None:
+                    vap_feat = fused.new_zeros(fused.shape[0], self.vap_window, self.vap_feat_dim)
+                elif vap_feat.dim() == 2:
+                    # 兼容旧单帧 [B, feat_dim] 输入：升一维成 [B, 1, feat_dim]
+                    vap_feat = vap_feat.unsqueeze(1)
+                v = self.vap_feat_encoder(vap_feat.to(fused.dtype))
             fused = self.vap_feat_merge(torch.cat([fused, v], dim=-1))
         logits = self.head(fused)
         if self.num_targets == 1:
             logits = logits.squeeze(-1)
+        outputs = [logits]
         if return_vap and getattr(self, "use_vap", False):
-            return logits, self.vap_head(fused)  # vap_logits: [B, 2*vap_bins]
-        return logits
+            outputs.append(self.vap_head(fused))  # vap_logits: [B, 2*vap_bins]
+        if return_bc_dense and getattr(self, "use_bc_dense", False):
+            outputs.append(self.bc_dense_head(fused))  # [B, target_chunks]
+        if len(outputs) == 1:
+            return logits
+        return tuple(outputs)

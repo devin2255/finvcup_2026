@@ -1,0 +1,23 @@
+{
+  "_comment": "跨模型软投票 spec 示例（容器内路径）。vapwin(真榜0.6409) ⊕ dualch(真榜0.6396)，各取 manifest 前 topk 个成员；60min 预算下建议 topk 合计 <= 5。单帧旧 dualch 模型 config 里 vap_feat.window 须为 1，两组可共用同一份 window=20 的测试 VAP 缓存。",
+  "models": [
+    {
+      "name": "vapwin",
+      "config": "configs/submit_ensemble_vap.yaml",
+      "manifest": "/app/ckpt/vapwin/ensemble_manifest.json",
+      "checkpoints_dir": "/app/ckpt/vapwin",
+      "topk": 3,
+      "weight": 1.0,
+      "vap_feat_dir": "/app/.cache/vap_test"
+    },
+    {
+      "name": "dualch",
+      "config": "configs/submit_dualch.yaml",
+      "manifest": "/app/ckpt/dualch/ensemble_manifest.json",
+      "checkpoints_dir": "/app/ckpt/dualch",
+      "topk": 2,
+      "weight": 1.0,
+      "vap_feat_dir": "/app/.cache/vap_test"
+    }
+  ]
+}
