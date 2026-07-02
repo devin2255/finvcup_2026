@@ -1,4 +1,4 @@
-seed: 42
+﻿seed: 42
 chunk_ms: 80
 context_chunks: 375
 target_chunks: 25
@@ -24,16 +24,16 @@ data_augmentation:
   context_prob: 0.5
 
 paths:
-  project_root: /mnt/workspace/dorihue/finvcup_2026
-  train_audio_dir: /mnt/workspace/dorihue/finvcup_2026/train/audio
-  train_text_dir: /mnt/workspace/dorihue/finvcup_2026/train/text
-  train_labels_dir: /mnt/workspace/dorihue/finvcup_2026/train/labels
+  project_root: /root/autodl-tmp/finvcup_2026
+  train_audio_dir: /root/autodl-tmp/finvcup_2026/train/audio
+  train_text_dir: /root/autodl-tmp/finvcup_2026/train/text
+  train_labels_dir: /root/autodl-tmp/finvcup_2026/train/labels
 
-  output_root: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_dualvap_bcd
-  checkpoints_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_dualvap_bcd/checkpoints
-  logs_dir: /mnt/workspace/dorihue/finvcup_2026/outputs/lmf_dualvap_bcd/logs
+  output_root: /root/autodl-tmp/finvcup_2026/outputs/lmf_dualvap_bcd
+  checkpoints_dir: /root/autodl-tmp/finvcup_2026/outputs/lmf_dualvap_bcd/checkpoints
+  logs_dir: /root/autodl-tmp/finvcup_2026/outputs/lmf_dualvap_bcd/logs
 
-  cache_root: /mnt/workspace/dorihue/finvcup_2026/.cache
+  cache_root: /root/autodl-tmp/finvcup_2026/.cache
 
 labels:
   C: 0
@@ -50,7 +50,7 @@ split:
 
 audio_encoder:
   type: whisper
-  model_name: /mnt/workspace/dorihue/modelscope/whisper-large-v3
+  model_name: /root/autodl-tmp/modelscope/whisper-large-v3
   proj_dim: 512
   freeze: true
   unfreeze_layers: 2
@@ -63,7 +63,7 @@ audio_encoder:
     dropout: 0.1
 
 text_encoder:
-  model_name: /mnt/workspace/dorihue/modelscope/Qwen3-0.6B
+  model_name: /root/autodl-tmp/modelscope/Qwen3-0.6B
   max_length: 256
   freeze_backbone: true
 
@@ -91,7 +91,7 @@ train:
   eval_valid_max_batches: null
   eval_valid_shuffle: false
 
-  batch_size: 128
+  batch_size: 64
   eval_batch_size: 256
   log_every_steps: 40
   gradient_accumulation_steps: 1
@@ -129,11 +129,11 @@ vap_feat:
   window: 20
   conv_channels: 64
   frame_rate: 10
-  cache_dir: /mnt/workspace/dorihue/finvcup_2026/.cache/vap_ch_kyoto
+  cache_dir: /root/autodl-tmp/finvcup_2026/.cache/vap_ch_kyoto
 
 env:
-  HF_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
-  TRANSFORMERS_CACHE: /mnt/workspace/dorihue/finvcup_2026/.cache/huggingface
-  TORCH_HOME: /mnt/workspace/dorihue/finvcup_2026/.cache/torch
+  HF_HOME: /root/autodl-tmp/finvcup_2026/.cache/huggingface
+  TRANSFORMERS_CACHE: /root/autodl-tmp/finvcup_2026/.cache/huggingface
+  TORCH_HOME: /root/autodl-tmp/finvcup_2026/.cache/torch
   HF_HUB_OFFLINE: "1"
   TRANSFORMERS_OFFLINE: "1"
